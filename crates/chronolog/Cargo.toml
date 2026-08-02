@@ -1,7 +1,12 @@
 [package]
 name = "chronolog"
+description = "A Raft-replicated, crash-consistent write-ahead log written against the chrono-sim traits."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
+chrono-sim = { workspace = true }

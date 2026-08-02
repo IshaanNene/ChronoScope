@@ -13,6 +13,9 @@ version = "0.1.0"
 [[package]]
 name = "chronolog"
 version = "0.1.0"
+dependencies = [
+ "chrono-sim",
+]
 
 [[package]]
 name = "chronolog-server"

@@ -294,11 +294,6 @@ impl Inner {
         self.timers.push(Reverse(Timer { at, seq, action }));
     }
 
-    fn schedule_at(&mut self, at: Nanos, action: Action) {
-        let seq = self.next_seq();
-        self.timers.push(Reverse(Timer { at: at.max(self.now), seq, action }));
-    }
-
     fn is_blocked(&self, from: NodeId, to: NodeId) -> bool {
         self.blocked.get(&(from, to)).copied().unwrap_or(0) > 0
     }
@@ -363,14 +358,6 @@ impl Kernel {
 
     fn mark_ready(&self, id: TaskId) {
         self.lock().ready.insert(id);
-    }
-
-    fn current_node(&self) -> NodeId {
-        let inner = self.lock();
-        inner
-            .current
-            .and_then(|t| inner.tasks.get(&t).map(|s| s.node))
-            .unwrap_or(NodeId::MAX)
     }
 }
 
@@ -644,6 +631,7 @@ impl Network for SimNet {
     }
 }
 
+#[derive(Debug)]
 struct SimStorage {
     kernel: Weak<Kernel>,
     node: NodeId,
@@ -716,6 +704,7 @@ impl Storage for SimStorage {
     }
 }
 
+#[derive(Debug)]
 struct SimFile {
     kernel: Weak<Kernel>,
     node: NodeId,

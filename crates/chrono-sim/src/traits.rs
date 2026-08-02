@@ -80,7 +80,7 @@ pub trait Network: Send + Sync {
 /// resolving means the bytes are in the page cache, and that is *all* it means.
 /// Only `fsync` promises anything, and even that promise is bounded by
 /// [`crate::fault::DiskPolicy`].
-pub trait File: Send + Sync {
+pub trait File: Send + Sync + std::fmt::Debug {
     /// Logical length, including bytes not yet fsynced.
     fn len(&self) -> u64;
 
@@ -103,7 +103,7 @@ pub trait File: Send + Sync {
 }
 
 /// A per-node filesystem namespace.
-pub trait Storage: Send + Sync {
+pub trait Storage: Send + Sync + std::fmt::Debug {
     fn open(&self, name: &str) -> BoxFuture<'static, std::io::Result<Arc<dyn File>>>;
     fn list(&self) -> BoxFuture<'static, std::io::Result<Vec<String>>>;
     fn remove(&self, name: &str) -> BoxFuture<'static, std::io::Result<()>>;

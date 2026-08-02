@@ -12,22 +12,22 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 
 ## Layer 0 — workspace
 
-- [ ] Cargo workspace, crates, pinned toolchain
-- [ ] `rustfmt.toml`, `.gitignore`, licence
+- [x] Cargo workspace, crates, pinned toolchain
+- [x] `rustfmt.toml`, `.gitignore`, licence
 
 ## Layer 1 — `chrono-sim` (deterministic core)
 
-- [ ] Trait surface: `Clock`, `Rng`, `Network`, `Storage`/`File`, `Spawner`
-- [ ] Seeded PRNG (SplitMix64 seeding → xoshiro256\*\*), no float paths
-- [ ] Event kernel: binary heap over `(virtual_time, seq, Event)`, virtual time jumps
-- [ ] Custom async executor: hand-written `Waker` via `RawWakerVTable`, PRNG-chosen poll order
-- [ ] Virtual clock: per-node skew + drift
-- [ ] Virtual network: per-link latency, drops, duplication, reordering, asymmetric partitions, heal
-- [ ] Virtual disk: sector-granular torn writes, `fsync` reordering, power-loss partial writes, latency spikes, `ENOSPC`
-- [ ] Process lifecycle: kill / restart, task reaping, crash semantics on unsynced pages
-- [ ] Fault policy sampled from the same PRNG
-- [ ] Trace recorder + rolling trace hash
-- [ ] Determinism guard — run each seed twice, diff rolling hash
+- [x] Trait surface: `Clock`, `Rng`, `Network`, `Storage`/`File`, `Spawner`
+- [x] Seeded PRNG (SplitMix64 seeding → xoshiro256\*\*), no float paths
+- [x] Event kernel: binary heap over `(virtual_time, seq, Event)`, virtual time jumps
+- [x] Custom async executor: hand-written `Waker` via `RawWakerVTable`, PRNG-chosen poll order
+- [x] Virtual clock: per-node skew + drift
+- [x] Virtual network: per-link latency, drops, duplication, reordering, asymmetric partitions, heal
+- [x] Virtual disk: sector-granular torn writes, `fsync` reordering, power-loss partial writes, latency spikes, `ENOSPC`
+- [x] Process lifecycle: kill / restart, task reaping, crash semantics on unsynced pages
+- [x] Fault policy sampled from the same PRNG
+- [x] Trace recorder + rolling trace hash
+- [x] Determinism guard — run each seed twice, diff rolling hash
 - [ ] Real runtime implementations of every trait
 
 ## Layer 2 — `chronolog` (system under test)
@@ -72,7 +72,35 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 
 ## Work log
 
-### 2026-08-02
+### 2026-08-02 — Layer 1 landed (`20cd6f1`)
+
+**`chrono-sim` is done and green: 41 tests.** The kernel loop is four lines and
+everything falls out of them: virtual time jumps to the next event, and task
+interleaving is a PRNG draw rather than an OS decision.
+
+Measured, not asserted:
+- 24 simulated hours of a sleeping node run in ~200ms of wall clock.
+- A 5-node cluster under `nemesis` for 120 simulated seconds produces ~90k
+  events; the same seed reproduces the trace hash, stats, and end time exactly.
+- The determinism guard catches a task that smuggles in `SystemTime::now()`.
+- fsynced data survives power loss; un-fsynced data does not; torn writes land
+  on sector boundaries.
+
+Decisions worth recording:
+- **Raft will be a pure state machine** (`step(input) -> Ready`), with all I/O
+  in a driver. etcd-raft's shape. It makes the persist-before-send ordering
+  explicit rather than incidental, and that ordering is where real bugs live.
+- **`Host::spawn_with`** exists because `host.spawn("t", async move { host.. })`
+  cannot borrow-check. Every task needs a `Host`, so the clone-into-closure form
+  is the one that gets used.
+- **The chaos ticker only arms when a chaos rate is non-zero.** Otherwise the
+  event heap is never empty, `Quiesced` is unreachable, and a benign 48-hour run
+  burns 1.7M no-op events.
+- **Partitions are evaluated when a packet enters the link**, not when it
+  leaves. A packet already in flight when a partition begins still arrives,
+  which is what a real network does and is a useful source of reordering.
+
+### 2026-08-02 — setup
 
 - Verified toolchain: rustc 1.94.0, arm64 macOS. crates.io reachable.
 - Target repo `~/Desktop/ChronoScope` was an empty git repo on `main`, remote `git@github.com:IshaanNene/ChronoScope.git`.
