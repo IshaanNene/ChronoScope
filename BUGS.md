@@ -324,6 +324,14 @@ Worth stating, because a bug ledger without one reads like advertising.
   everything real, and always earlier — an internal invariant breaks long
   before a client can observe anything wrong, which is the argument for having
   both.
+
+  Worth being precise about what that does and does not establish. The checker
+  concludes on histories up to roughly 15,000 operations; a long run producing
+  more than that reports `Inconclusive` rather than guessing. So "no
+  linearizability violation" means *none in the runs where the checker reached
+  a verdict*, not none anywhere. Raising the budget makes long runs conclusive
+  at roughly 7x the wall-clock cost, which is worth it when triaging one seed
+  and not worth it across a swarm.
 - **No determinism divergence in the final tree.** 32 seeds × 2 runs, identical
   event-trace hashes. This is the claim everything else rests on, so it is
   checked in CI on every push.

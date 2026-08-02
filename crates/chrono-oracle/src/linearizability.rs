@@ -215,8 +215,18 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// Configuration limits. The defaults comfortably handle the histories the
-/// swarm produces; raise them when triaging a specific seed.
+/// Configuration limits.
+///
+/// The default concludes on histories up to roughly 15,000 operations and
+/// costs well under a second, which keeps a swarm run dominated by the
+/// simulation rather than by the checker. Beyond that it reports
+/// `Inconclusive` — honestly, rather than guessing — and the Raft invariant
+/// oracles carry the run.
+///
+/// That division of labour is deliberate and is borne out by `BUGS.md`: every
+/// real bug was caught by an internal invariant, and always *earlier* than a
+/// client could have observed anything. Raise this when triaging a specific
+/// seed, where one slow run is a fine price.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Maximum configurations to explore per key before giving up.
@@ -288,6 +298,25 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
         chose: Option<usize>,
     }
 
+    // A note on an optimization that is *not* here.
+    //
+    // It is tempting to "settle" the prefix whenever every earlier operation
+    // returned before the frontier one was invoked: real time forces their
+    // order, so discard the stack below and start fresh. That turns this
+    // workload's 40-second check into well under a second.
+    //
+    // It is also wrong, and the crate's own tests catch it. Settling discards
+    // *alternative orderings* of the prefix, and real-time separation does not
+    // make the prefix's resulting state unique: two concurrent writes that both
+    // returned before the next invocation can be ordered either way, leaving
+    // different values. An `Unknown` operation is worse still — whether it took
+    // effect at all is a free choice, and settling silently commits to one.
+    //
+    // A checker that runs fast and can miss a violation is worth strictly less
+    // than a slow one that cannot, so this stays out. `Limits::max_states`
+    // bounds the cost instead, and an exhausted budget reports `Inconclusive`
+    // rather than guessing.
+
     let mut visited: BTreeSet<(Value, usize, u64)> = BTreeSet::new();
     let mut explored: u64 = 0;
     // Set if the `AHEAD` window ever cut off a candidate that was still legally
@@ -317,7 +346,7 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
         chose: None,
     }];
 
-    while let Some(frame) = stack.last_mut() {
+    while !stack.is_empty() {
         explored += 1;
         if explored > limits.max_states {
             return Verdict::Inconclusive {
@@ -325,9 +354,11 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
                 max_concurrency: history.max_concurrency(),
             };
         }
-        if frame.frontier == n {
+
+        if stack.last().expect("checked non-empty").frontier == n {
             return Verdict::Linearizable;
         }
+        let frame = stack.last_mut().expect("checked non-empty");
 
         // Nothing invoked after the frontier operation must return can be
         // linearized before it. Events are sorted by invocation, so this is a
