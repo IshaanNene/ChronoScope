@@ -14,9 +14,9 @@ written against those traits. It never names a socket, a file descriptor, a
 clock, or a thread — so the same code runs against the simulator's virtual
 world and against real hardware, unchanged.
 
-The payoff is [`BUGS.md`](BUGS.md): twelve real consensus and storage bugs the
+The payoff is [`BUGS.md`](BUGS.md): fifteen real consensus and storage bugs the
 simulator found in this implementation, each with what it looked like, what it
-actually was, and why it was hard to see. Ten fixed, two open.
+actually was, and why it was hard to see. Thirteen fixed, two open.
 
 ```
 $ chronoscope swarm --seeds 200 --secs 400
@@ -110,7 +110,8 @@ What the universe is allowed to do to you:
 - **Network** — per-link latency distributions, loss, duplication, reordering,
   asymmetric partitions, whole-cluster splits
 - **Disk** — sector-granular torn writes on power loss, lost un-fsynced writes,
-  `fsync` as the *only* durability barrier, latency spikes, `ENOSPC`
+  `fsync` as the *only* durability barrier, latency spikes, and a live-usage
+  `ENOSPC` model where compaction actually frees space
 - **Clocks** — per-node skew and drift, so nodes genuinely disagree
 - **Process** — hard crash with task reaping, restart, `SIGSTOP`-style freeze
 
@@ -261,7 +262,14 @@ Turning that on found two real bugs within minutes, and quantified what
 reconfiguration costs:
 
 ```
-failures per 200 seeds, nemesis, 400 simulated seconds
+failures per 200 seeds, 400 simulated seconds
+
+  nemesis, static             0 / 200
+  corrupting                  1 / 200
+  diskfull                   10 / 200   all liveness
+  membership, every 15s      17 / 200   all liveness
+
+and what reconfiguration costs
 
   reconfiguration rate   direct voter add   learner first
   never                       0 / 200            —

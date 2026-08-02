@@ -38,6 +38,7 @@ use crate::msg::{AdminResult, Message, Wire};
 use crate::raft::{Raft, RaftOptions, Ready, Role};
 use crate::types::{Config, ConfigChange, Entry, EntryKind, Index, Snapshot};
 use crate::wal::{Wal, WalOptions};
+use chrono_sim::traits::is_enospc;
 
 #[derive(Clone, Debug)]
 pub struct NodeOptions {
@@ -115,6 +116,7 @@ pub struct NodeMetrics {
     pub reads_stale: AtomicU64,
     pub config_changes_proposed: AtomicU64,
     pub config_changes_applied: AtomicU64,
+    pub enospc: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -146,6 +148,7 @@ impl NodeMetrics {
             "reads_stale" => &self.reads_stale,
             "config_changes_proposed" => &self.config_changes_proposed,
             "config_changes_applied" => &self.config_changes_applied,
+            "enospc" => &self.enospc,
             _ => return 0,
         };
         c.load(Ordering::Relaxed)
@@ -415,7 +418,31 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
         // --- the Ready cycle ----------------------------------------------
         let truncate_to = raft.truncate_to();
         let ready = raft.ready();
-        persist(&host, &handle, &mut wal, &mut kv, &ready, truncate_to).await?;
+        if let Err(e) = persist(&host, &handle, &mut wal, &mut kv, &ready, truncate_to).await {
+            // A full disk is pressure, not death.
+            //
+            // Failing the whole driver here is the obvious reading of "the
+            // write failed" and it is far too harsh: the node stays up,
+            // listening and voting, and never makes progress again — even
+            // though compacting a segment would free the space seconds later.
+            //
+            // The right response is narrower. Nothing was made durable, so
+            // nothing may be sent and nothing may be advanced; the same `Ready`
+            // is simply regenerated next cycle. A leader stands down, because
+            // continuing to lead while unable to append refuses every write
+            // *and* stops anyone else being elected to serve them. Then we try
+            // to free space and carry on.
+            if is_enospc(&e) {
+                NodeMetrics::inc(&handle.metrics.enospc);
+                host.note(|| format!("disk full: {e} — standing down and compacting"));
+                raft.step_down();
+                free_space(&host, &handle, &mut raft, &kv, &mut wal).await;
+                continue;
+            }
+            // Anything else — a read that fails, a device error — means this
+            // node cannot trust its own storage. Stopping is correct.
+            return Err(e);
+        }
 
         // Reconcile the durable log with memory.
         //
@@ -430,7 +457,17 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
         // contract is simply: **the WAL mirrors the log**. Checking that
         // directly costs two integer comparisons per cycle and cannot be got
         // wrong by a path nobody thought about.
-        reconcile(&host, &handle, &mut wal, &raft).await?;
+        if let Err(e) = reconcile(&host, &handle, &mut wal, &raft).await {
+            // Reconciliation appends, so it can hit the same full disk. Same
+            // answer: nothing durable, nothing sent, try again next cycle.
+            if is_enospc(&e) {
+                NodeMetrics::inc(&handle.metrics.enospc);
+                raft.step_down();
+                free_space(&host, &handle, &mut raft, &kv, &mut wal).await;
+                continue;
+            }
+            return Err(e);
+        }
 
         // Only now, with everything durable, may anything be sent.
         for (to, msg) in &ready.messages {
@@ -480,17 +517,61 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
 
         if raft.should_snapshot() {
             if let Some(snap) = raft.snapshot_at_applied(kv.snapshot()) {
-                wal.save_snapshot(&snap).await?;
-                raft.compact(&snap);
-                wal.compact_through(snap.last_index).await?;
-                NodeMetrics::inc(&handle.metrics.snapshots_taken);
-                host.note(|| format!("snapshot @{} taken, log compacted", snap.last_index));
+                // Best-effort: writing a snapshot needs space too, and failing
+                // to free space is not a reason to stop serving.
+                if safe_to_compact(&snap, &raft, &wal) && wal.save_snapshot(&snap).await.is_ok() {
+                    raft.compact(&snap);
+                    if wal.compact_through(snap.last_index).await.is_ok() {
+                        NodeMetrics::inc(&handle.metrics.snapshots_taken);
+                        host.note(|| format!("snapshot @{} taken, log compacted", snap.last_index));
+                    }
+                }
             }
         }
 
         publish(&handle, &raft, &kv, &wal, &digest, opts.inspect);
     }
     Ok(())
+}
+
+/// Snapshot and compact, to give a full disk somewhere to go.
+///
+/// Best-effort by construction: every step here can itself fail on a full
+/// disk, and a failure simply means the node retries next cycle.
+async fn free_space(
+    host: &Host,
+    handle: &NodeHandle,
+    raft: &mut Raft,
+    kv: &KvStore,
+    wal: &mut Wal,
+) {
+    let Some(snap) = raft.snapshot_at_applied(kv.snapshot()) else {
+        return;
+    };
+    if !safe_to_compact(&snap, raft, wal) {
+        return;
+    }
+    if wal.save_snapshot(&snap).await.is_err() {
+        return;
+    }
+    raft.compact(&snap);
+    if wal.compact_through(snap.last_index).await.is_ok() {
+        NodeMetrics::inc(&handle.metrics.snapshots_taken);
+        host.note(|| format!("compacted through {} to free space", snap.last_index));
+    }
+}
+
+/// Whether this snapshot may be used to discard log entries.
+///
+/// The binding condition is that **compaction must never outrun the durable
+/// log.** Snapshots are taken at the *applied* index, and applied normally
+/// trails what is on disk — but not always. A node whose disk is full keeps
+/// applying committed entries it could not write, so applied runs ahead of the
+/// WAL. Compacting there drops those entries from memory while they are also
+/// absent from disk: they exist nowhere, and the next append lands past the
+/// hole they left.
+fn safe_to_compact(snap: &Snapshot, raft: &Raft, wal: &Wal) -> bool {
+    snap.last_index > raft.log().snapshot_index() && snap.last_index <= wal.last_index()
 }
 
 /// Make the durable log match the in-memory log, whatever route either took.

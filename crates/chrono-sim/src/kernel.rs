@@ -182,7 +182,16 @@ struct NodeState {
     skew: i64,
     /// Rate error, parts per million.
     drift_ppm: i64,
-    written_bytes: u64,
+    /// Bytes this node's files currently occupy.
+    ///
+    /// Deliberately *live* usage rather than cumulative bytes written. The
+    /// cumulative version is easier and models the wrong thing: it never
+    /// decreases, so a node that trips the quota once can never write again
+    /// even after compaction deletes half its segments. ENOSPC becomes a
+    /// terminal fault, every node dies at the same byte count, and the
+    /// interesting question — can a node survive a full disk, compact, and
+    /// recover — is never asked.
+    used_bytes: u64,
     boots: u32,
     /// This node's own randomness substream, stable across restarts, so that a
     /// change to one node's number of draws does not shift every other node's.
@@ -201,6 +210,7 @@ pub struct Stats {
     pub msgs_delivered: u64,
     pub msgs_dropped: u64,
     pub msgs_duplicated: u64,
+    pub msgs_corrupted: u64,
     pub disk_writes: u64,
     pub disk_bytes: u64,
     pub fsyncs: u64,
@@ -210,6 +220,7 @@ pub struct Stats {
     pub restarts: u64,
     pub partitions: u64,
     pub pauses: u64,
+    pub enospc: u64,
     pub events: u64,
 }
 
@@ -677,6 +688,7 @@ impl Network for SimNet {
             let idx = inner.rng.below(payload.len() as u64) as usize;
             let bit = inner.rng.below(8) as u32;
             payload[idx] ^= 1 << bit;
+            inner.stats.msgs_corrupted += 1;
             inner.record(Event::Corrupted {
                 from,
                 to,
@@ -762,7 +774,12 @@ impl Storage for SimStorage {
             };
             let mut inner = k.lock();
             if let Some(n) = inner.nodes.get_mut(&node) {
-                n.files.remove(&name);
+                if let Some(f) = n.files.remove(&name) {
+                    // Deleting a segment frees its space, which is what makes
+                    // ENOSPC a pressure fault a node can recover from rather
+                    // than a wall it hits once.
+                    n.used_bytes = n.used_bytes.saturating_sub(f.view.len() as u64);
+                }
             }
             Ok(())
         })
@@ -846,15 +863,22 @@ impl File for SimFile {
                 if !n.up {
                     return Err(crate::traits::eio("node down"));
                 }
-                let would_be = n.written_bytes + data.len() as u64;
+                // How much this write actually grows the file. Overwriting
+                // bytes already on disk costs nothing.
+                let growth = {
+                    let cur = n.files.get(&name).map(|f| f.view.len() as u64).unwrap_or(0);
+                    (offset + data.len() as u64).saturating_sub(cur)
+                };
                 if let Some(limit) = quota {
-                    if would_be > limit {
+                    if n.used_bytes + growth > limit {
                         let fid = n.files.get(&name).map(|f| f.id).unwrap_or(0);
+                        inner.stats.enospc += 1;
+                        inner.stats.enospc += 1;
                         inner.record(Event::Enospc { node, file: fid });
                         return Err(crate::traits::enospc());
                     }
                 }
-                n.written_bytes = would_be;
+                n.used_bytes += growth;
                 let Some(f) = n.files.get_mut(&name) else {
                     return Err(crate::traits::eio("file closed"));
                 };
@@ -987,8 +1011,10 @@ impl File for SimFile {
                     return Err(crate::traits::eio("file gone"));
                 };
                 let fid = f.id;
+                let freed = (f.view.len() as u64).saturating_sub(to);
                 f.view.truncate(to as usize);
                 f.pending.push(PendingOp::Truncate(to));
+                n.used_bytes = n.used_bytes.saturating_sub(freed);
                 inner.record(Event::Truncate {
                     node,
                     file: fid,
@@ -1142,7 +1168,7 @@ impl Sim {
                     files: BTreeMap::new(),
                     skew,
                     drift_ppm,
-                    written_bytes: 0,
+                    used_bytes: 0,
                     boots: 0,
                     rng: node_rng,
                 },

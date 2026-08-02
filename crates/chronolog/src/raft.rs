@@ -526,6 +526,18 @@ impl Raft {
         Some(index)
     }
 
+    /// Stand down to follower at the current term.
+    ///
+    /// For a leader that has discovered it cannot make progress — most
+    /// concretely, one whose disk is full. Continuing to lead while unable to
+    /// append means refusing every write while also preventing anyone else
+    /// from being elected to serve them.
+    pub fn step_down(&mut self) {
+        if self.role == Role::Leader {
+            self.become_follower(self.term, None);
+        }
+    }
+
     /// Begin a linearizable read. The returned context appears in
     /// [`Ready::reads`] once the read is safe to serve.
     pub fn read_index(&mut self) -> Option<u64> {

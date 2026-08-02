@@ -542,6 +542,79 @@ fn a_torn_snapshot_falls_back_to_the_previous_slot() {
     );
 }
 
+#[test]
+fn a_failed_append_leaves_the_log_exactly_where_it_started() {
+    // Regression: a batch is written entry by entry, so a full disk part-way
+    // through used to leave a *prefix* of it on disk. The caller retries the
+    // whole batch, collides with that prefix, and fails the contiguity check —
+    // turning recoverable pressure into a fatal error.
+    let disk = DiskPolicy {
+        enospc_after_bytes: Some(4096),
+        ..quiet_disk()
+    };
+    let (sim, host) = sim_with(31, disk);
+    let written: Vec<Entry> = (1..=200).map(|i| cmd(1, i)).collect();
+
+    let w = written.clone();
+    let (before, after, failed) = block_on(&sim, &host, move |h| async move {
+        let mut wal = Wal::open(h, WalOptions::default()).await.unwrap().wal;
+        // A first batch that fits.
+        wal.append(&w[..10]).await.unwrap();
+        wal.sync().await.unwrap();
+        let before = wal.last_index();
+        // A batch far too large for the remaining quota.
+        let failed = wal.append(&w[10..]).await.is_err();
+        (before, wal.last_index(), failed)
+    });
+
+    assert!(failed, "the quota should have refused the large batch");
+    assert_eq!(
+        after, before,
+        "a failed append must be a no-op: the log ended at {after}, not {before}"
+    );
+}
+
+#[test]
+fn a_retry_after_a_failed_append_succeeds_once_space_is_free() {
+    // The other half: rolling back must leave the log in a state a retry can
+    // actually use.
+    let disk = DiskPolicy {
+        enospc_after_bytes: Some(8192),
+        ..quiet_disk()
+    };
+    let (sim, host) = sim_with(32, disk);
+    let written: Vec<Entry> = (1..=400).map(|i| cmd(1, i)).collect();
+
+    let w = written.clone();
+    let recovered = block_on(&sim, &host, move |h| async move {
+        let mut wal = Wal::open(
+            h,
+            WalOptions {
+                segment_bytes: 1024,
+                compact_slack_bytes: 0,
+            },
+        )
+        .await
+        .unwrap()
+        .wal;
+        let mut next = 0usize;
+        // Fill until the disk refuses.
+        while next < w.len() && wal.append(&w[next..next + 10]).await.is_ok() {
+            wal.sync().await.unwrap();
+            next += 10;
+        }
+        assert!(next > 0, "some writes should have succeeded");
+        assert!(next < w.len(), "the quota should have stopped us");
+        // Free space the way the driver does, then retry the same batch.
+        wal.compact_through(wal.last_index()).await.unwrap();
+        wal.append(&w[next..next + 10]).await.is_ok()
+    });
+    assert!(
+        recovered,
+        "a retry must succeed once compaction has freed space"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The property, under randomised crashes
 // ---------------------------------------------------------------------------

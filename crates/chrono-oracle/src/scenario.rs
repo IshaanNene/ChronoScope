@@ -180,20 +180,23 @@ impl std::fmt::Display for RunReport {
         )?;
         writeln!(
             f,
-            "faults      {} crashes, {} partitions, {} pauses, {} torn writes, {} lost writes",
+            "faults      {} crashes, {} partitions, {} pauses, {} torn writes, \
+             {} lost writes, {} ENOSPC",
             self.stats.crashes,
             self.stats.partitions,
             self.stats.pauses,
             self.stats.torn_writes,
-            self.stats.lost_writes
+            self.stats.lost_writes,
+            self.stats.enospc
         )?;
         writeln!(
             f,
-            "network     {} sent, {} delivered, {} dropped, {} duplicated",
+            "network     {} sent, {} delivered, {} dropped, {} duplicated, {} corrupted",
             self.stats.msgs_sent,
             self.stats.msgs_delivered,
             self.stats.msgs_dropped,
-            self.stats.msgs_duplicated
+            self.stats.msgs_duplicated,
+            self.stats.msgs_corrupted
         )?;
         writeln!(
             f,

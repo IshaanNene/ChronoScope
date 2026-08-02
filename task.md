@@ -76,15 +76,21 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] New voters staged through a learner, measured at half the failure rate
 - [x] Oracles taught the difference between "not a member" and "not converging"
 
+## Layer 1 — fault modes that were modelled but never fired
+
+- [x] `corrupt_ppm` — a `corrupting` preset; 2,610 corrupt frames, nothing broke
+- [x] `enospc_after_bytes` — remodelled as live usage so compaction frees space,
+      then a `diskfull` preset. Three bugs, each exposed by fixing the last.
+
 ## Known gaps
 
 Audited against the spec in [`ROADMAP.md`](ROADMAP.md). The three that matter:
 
 - [x] ~~The swarm never proposes a membership change~~ — done, and it found
       CS-010, CS-011, and CS-012 immediately.
-- [ ] `corrupt_ppm` and `enospc_after_bytes` are modelled and set to zero in
-      every preset, so two fault paths are never exercised in a live run. Both
-      are one constant.
+- [x] ~~`corrupt_ppm` and `enospc_after_bytes` never fire~~ — both now have
+      presets. ENOSPC needed a modelling fix first: it counted cumulative bytes
+      written, so a node that tripped the quota once could never write again.
 - [ ] CS-009 and CS-012 open, probably one cause; the Helm chart has no
       templates; throughput is 7.4k/sec against a 50k–150k target.
 

@@ -16,8 +16,17 @@ Work that does neither is listed last, honestly labelled, and should probably
 stay unbuilt. A simulator with more features and fewer findings is a worse
 artifact than this one.
 
-Current state: **12 bugs, 10 fixed, 2 open.** 201 tests, 0 clippy warnings, a
+Current state: **15 bugs, 13 fixed, 2 open.** 203 tests, 0 clippy warnings, a
 200-seed static swarm clean at ~3300x compression.
+
+Swarm results by fault mode, 200 seeds each, 400 simulated seconds:
+
+| Preset | Failures | Notes |
+|---|---|---|
+| `nemesis` (static) | 0 / 200 | |
+| `corrupting` | 1 / 200 | the CS-009 shape, not corruption-specific |
+| membership, every 15s | 17 / 200 | all liveness; see the cost table in `BUGS.md` |
+| `diskfull` | 10 / 200 | all liveness |
 
 ---
 
@@ -79,7 +88,21 @@ or remove a voter, drive `maybe_finish_config_change`, and let chaos run
 throughout. Extend the invariant oracle to check quorum intersection across the
 joint configuration. Expect bugs — this is where they are.
 
-## P0.2 — Wire corruption is modelled but never enabled
+## ~~P0.2 — Wire corruption is modelled but never enabled~~ — **DONE**
+
+A `corrupting` preset now flips bits in flight. The result is a **negative**
+one and worth having: 2,610 corrupt frames in a 200-second run, nothing broken.
+The CRC rejects them and Raft treats each as a lost message. One failure in 200
+seeds, and it was the CS-009 shape rather than anything corruption-specific.
+
+Remaining: this tests *rejection*, not Byzantine behaviour. A node that lies —
+different entries to different peers, or a forged term — is a much larger
+change, and Raft is not designed to survive it, so the interesting question is
+what it degrades to. See P3.2.
+
+The original reasoning:
+
+## P0.2 (original) — Wire corruption is modelled but never enabled
 
 `LinkPolicy::corrupt_ppm` exists, flips a bit in flight, and is set to `0` in
 every preset. The decoder is tested against adversarial bytes in unit tests and
@@ -95,13 +118,29 @@ decodes to something plausible.
 check that the invariant oracles still hold. Cheap to add, and it exercises a
 path the whole protocol assumes cannot happen.
 
-## P0.3 — `ENOSPC` is modelled but never enabled
+## ~~P0.3 — `ENOSPC` is modelled but never enabled~~ — **DONE**
 
-`DiskPolicy::enospc_after_bytes` is `None` in every preset. The WAL returns the
-error correctly (there is a unit test), but no live run has ever had a node hit
-a full disk mid-consensus. A leader that cannot append is a specific and nasty
-failure — it must step down rather than acknowledge, and nothing currently
-proves it does.
+The highest-yield item so far: **three bugs** (CS-013, CS-014, CS-015), each
+one exposed by fixing the one before it.
+
+It also needed a modelling fix first. `enospc_after_bytes` was checked against
+*cumulative bytes ever written*, which never decreases — so a node that tripped
+the quota once could never write again even after compaction deleted half its
+segments. ENOSPC was a wall rather than pressure, every node died at the same
+byte count, and the interesting question was never asked. Usage is now measured
+live, so compaction genuinely frees space.
+
+The prediction in the original text was right, and understated:
+
+> *A leader that cannot append is a specific and nasty failure — it must step
+> down rather than acknowledge, and nothing currently proves it does.*
+
+It did not step down. It died. And the two bugs behind that one were only
+reachable once it stopped dying.
+
+Remaining: the `diskfull` swarm sits at 10 failures in 200 seeds, all liveness
+stalls, which a full disk plausibly causes. Worth confirming rather than
+assuming.
 
 ## P0.4 — DNS is not virtualized
 

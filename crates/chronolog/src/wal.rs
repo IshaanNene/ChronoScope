@@ -376,6 +376,27 @@ impl Wal {
         if entries.is_empty() {
             return Ok(());
         }
+        // All or nothing.
+        //
+        // A batch is written entry by entry, so any failure part-way — a full
+        // disk is the realistic one — leaves a *prefix* of it on disk. The
+        // caller sees an error and retries the whole batch, which then collides
+        // with the prefix already there and fails the contiguity check, and
+        // that error is fatal where the original was merely pressure.
+        //
+        // Cutting the partial batch back makes a failed append a no-op, so the
+        // retry starts from exactly where the previous attempt did.
+        let rollback_to = self.last_index();
+        match self.append_inner(entries).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = self.truncate_from(rollback_to + 1).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn append_inner(&mut self, entries: &[Entry]) -> std::io::Result<()> {
         self.stats.appends += 1;
         for entry in entries {
             let expected = self.last_index() + 1;

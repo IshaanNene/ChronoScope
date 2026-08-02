@@ -246,7 +246,7 @@ impl FaultPolicy {
                 ]),
                 loss_ppm: 80_000,
                 duplicate_ppm: 40_000,
-                corrupt_ppm: 0,
+                corrupt_ppm: 20_000,
             },
             disk: DiskPolicy {
                 torn_write_ppm: 600_000,
@@ -255,6 +255,13 @@ impl FaultPolicy {
                 slow_multiplier: 200,
                 ..DiskPolicy::default()
             },
+            // Corruption is off in every other preset. Here it is on, which
+            // exercises the one path the whole protocol assumes cannot happen:
+            // a frame arriving that is not what was sent. The per-frame CRC
+            // should reject it and Raft should treat it as an ordinary lost
+            // message — that is the property being checked, and it has to be
+            // checked in a *running cluster*, not only against a decoder in a
+            // unit test.
             clock: ClockPolicy {
                 max_skew: Nanos::from_millis(400),
                 max_drift_ppm: 3_000,
@@ -270,6 +277,31 @@ impl FaultPolicy {
             },
             chaos_tick: Nanos::from_millis(50),
         }
+    }
+
+    /// A disk under space pressure.
+    ///
+    /// The budget is deliberately small enough that a busy node trips it
+    /// regularly, and — because usage is measured live rather than
+    /// cumulatively — compaction frees space again. That makes ENOSPC a
+    /// recurring pressure fault rather than a wall, which is the interesting
+    /// version: a leader that cannot append must refuse to acknowledge, not
+    /// acknowledge and lose the write.
+    pub fn diskfull() -> Self {
+        let mut p = Self::nemesis();
+        p.disk.enospc_after_bytes = Some(96 * 1024);
+        p
+    }
+
+    /// Corruption on the wire, on top of everything else.
+    ///
+    /// Not Byzantine: a flipped bit is caught by the frame's own CRC, so this
+    /// tests that corrupt input is *rejected*, not that a lying node is
+    /// tolerated. Raft is not designed to survive the latter.
+    pub fn corrupting() -> Self {
+        let mut p = Self::nemesis();
+        p.link.corrupt_ppm = 30_000;
+        p
     }
 
     /// Network-only chaos with a pristine disk: isolates consensus bugs from
@@ -297,10 +329,19 @@ impl FaultPolicy {
             "torture" => Some(Self::torture()),
             "network" => Some(Self::network_only()),
             "storage" => Some(Self::storage_only()),
+            "diskfull" => Some(Self::diskfull()),
+            "corrupting" => Some(Self::corrupting()),
             _ => None,
         }
     }
 
-    pub const PRESETS: &'static [&'static str] =
-        &["benign", "nemesis", "torture", "network", "storage"];
+    pub const PRESETS: &'static [&'static str] = &[
+        "benign",
+        "nemesis",
+        "torture",
+        "network",
+        "storage",
+        "diskfull",
+        "corrupting",
+    ];
 }

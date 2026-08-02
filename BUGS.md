@@ -1,7 +1,7 @@
 # BUGS.md
 
-Real correctness bugs the simulator found in Chronolog. Twelve so far: ten
-fixed, two open.
+Real correctness bugs the simulator found in Chronolog. Fifteen so far:
+thirteen fixed, two open.
 
 This file is the point of the project. Anyone can assert their distributed
 system is correct; this is the evidence that mine was not, in specific and
@@ -410,8 +410,121 @@ a committed entry overwritten across a term boundary — which suggests the two
 share a cause, and that membership churn simply widens the window that produces
 it.
 
-Recorded rather than chased, because a second independent reproduction of the
-same shape is more useful for finding the cause than either one alone.
+**A third reproduction has since appeared**, under the `corrupting` preset at a
+different seed:
+
+```
+STATE MACHINE SAFETY VIOLATED: n0 and n1 applied different histories through index 5041
+LEADER COMPLETENESS VIOLATED: index 5041 was committed in term 5 but n0 now holds term 6 there
+```
+
+Three independent reproductions — static churn, membership churn, wire
+corruption — all with the same signature: a committed entry overwritten as the
+term advances by exactly one. Whatever this is, it is not specific to any fault
+mode; those only widen the window. That is a much stronger starting point for
+finding it than any single seed.
+
+---
+
+## CS-013 — a full disk kills the node permanently
+
+| | |
+|---|---|
+| **Found by** | The `diskfull` preset, first run, seed `0x3` |
+| **Severity** | Availability — a recoverable fault made terminal |
+| **Fixed** | `node::run` ENOSPC path, `crates/chronolog/src/node.rs` |
+
+**Presented as** `DRIVER STOPPED: ENOSPC: simulated disk full`, two `ENOSPC`
+events into a run.
+
+**Actually was** the driver treating any persist failure as fatal. `persist`
+returned `Err`, the loop returned, and the node became a zombie — up,
+listening, voting, never progressing again — despite compaction being able to
+free the space seconds later.
+
+**Why it was hard to see.** Every other fault the simulator injects is either
+transient by nature (a dropped packet, a partition that heals) or genuinely
+terminal (a crash, which restarts cleanly). A full disk is the only one that is
+*persistent but recoverable*, and the code had no category for that.
+
+**Fix.** ENOSPC is pressure, not death. Nothing was made durable, so nothing is
+sent and nothing is advanced — the same `Ready` is regenerated next cycle. A
+leader stands down, because continuing to lead while unable to append refuses
+every write *and* prevents anyone else being elected to serve them. Then the
+node snapshots and compacts to free space, and carries on.
+
+With that, the same seed completes 23,324 client operations through **5,432
+ENOSPC events**, linearizable, all invariants holding.
+
+---
+
+## CS-014 — a failed append leaves a partial batch on disk
+
+| | |
+|---|---|
+| **Found by** | The `diskfull` swarm — 26 of 200 seeds |
+| **Severity** | Data loss — recoverable pressure turned fatal |
+| **Fixed** | `Wal::append`, `crates/chronolog/src/wal.rs` |
+
+Surfaced immediately *by fixing CS-013*: once the driver retried instead of
+dying, the retries started colliding.
+
+**Actually was** `append` writing a batch entry by entry with no rollback. A
+failure part-way leaves a prefix of the batch on disk; the caller retries the
+whole batch, collides with that prefix, and fails the contiguity check — which
+is fatal, where the original error was merely pressure.
+
+**Fix.** Roll the partial batch back so a failed append is a no-op and the
+retry starts exactly where the previous attempt did.
+
+---
+
+## CS-015 — compaction outruns the durable log
+
+| | |
+|---|---|
+| **Found by** | The `diskfull` swarm, after CS-014 — still 26 of 200 |
+| **Severity** | Data loss — entries erased from memory *and* disk |
+| **Fixed** | `node::safe_to_compact`, `crates/chronolog/src/node.rs` |
+
+**Presented as** `WAL appends must be contiguous: got 7596, expected 7592` —
+a four-entry hole, with the WAL at 7591 and the log starting at 7596.
+
+**Actually was** the interaction between snapshotting and a full disk.
+Snapshots are taken at the *applied* index, and applied normally trails what is
+on disk. Not always: a node whose disk is full keeps applying committed entries
+it could not write, so applied runs *ahead* of the WAL. Compacting there drops
+those entries from memory while they are also absent from disk. They exist
+nowhere, and the next append lands past the hole they left.
+
+**Why it was hard to see.** On a healthy disk the invariant holds for free —
+you have to be unable to write while still able to apply for it to break at
+all.
+
+**Fix.** State the invariant and check it: **compaction must never outrun the
+durable log.** `safe_to_compact` requires `snap.last_index <= wal.last_index()`,
+and it guards the ordinary snapshot path too, where the same hazard exists.
+
+Together, CS-013 through CS-015 took the `diskfull` swarm from 37 failures in
+200 seeds to 10, all of them liveness stalls — which a full disk genuinely
+causes.
+
+---
+
+## What corruption on the wire did *not* break
+
+Worth recording as a negative result. The `corrupting` preset flips a bit in
+2,610 frames of a 200-second run — after the frame's CRC was computed, so every
+one of them is detectably wrong.
+
+Nothing broke. The decoder rejects them, Raft treats each as an ordinary lost
+message and retries, and the cluster completes its workload. Across 200 seeds
+there was exactly one failure, and it was the CS-009 shape rather than anything
+corruption-specific.
+
+That is the property the frame checksum exists to provide, and it had never
+been demonstrated in a *running cluster* before — only against a decoder in a
+unit test, which cannot tell you whether the protocol above it copes.
 
 ---
 
