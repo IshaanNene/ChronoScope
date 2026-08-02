@@ -141,9 +141,16 @@ impl Config {
     /// Does this set of nodes constitute a quorum? In joint consensus it must
     /// be a majority of *both* configurations.
     pub fn has_quorum(&self, votes: &BTreeSet<NodeId>) -> bool {
+        // A configuration with no voters at all has no quorum. Without this
+        // guard the vacuous-truth reading of "a majority of the empty set"
+        // makes an unconfigured node think every decision is unanimous — which
+        // turns a bootstrap mistake into a safety violation rather than a hang.
+        if self.voters.is_empty() && self.outgoing.is_empty() {
+            return false;
+        }
         fn majority(group: &BTreeSet<NodeId>, votes: &BTreeSet<NodeId>) -> bool {
             if group.is_empty() {
-                return true;
+                return true; // this half is not constraining (non-joint case)
             }
             let got = group.iter().filter(|id| votes.contains(id)).count();
             got * 2 > group.len()
