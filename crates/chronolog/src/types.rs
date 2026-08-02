@@ -131,7 +131,12 @@ impl Config {
 
     /// Every node that must be replicated to, voters and learners alike.
     pub fn all_nodes(&self) -> BTreeSet<NodeId> {
-        self.voters.iter().chain(self.outgoing.iter()).chain(self.learners.iter()).copied().collect()
+        self.voters
+            .iter()
+            .chain(self.outgoing.iter())
+            .chain(self.learners.iter())
+            .copied()
+            .collect()
     }
 
     pub fn is_voter(&self, id: NodeId) -> bool {
@@ -165,7 +170,10 @@ impl Config {
     /// quorum indices, which is what stops a change from committing data that
     /// only one half of the transition has.
     pub fn quorum_index(&self, matched: impl Fn(NodeId) -> Index) -> Index {
-        fn quorum_of(group: &BTreeSet<NodeId>, matched: &impl Fn(NodeId) -> Index) -> Option<Index> {
+        fn quorum_of(
+            group: &BTreeSet<NodeId>,
+            matched: &impl Fn(NodeId) -> Index,
+        ) -> Option<Index> {
             if group.is_empty() {
                 return None;
             }
@@ -176,7 +184,10 @@ impl Config {
             idx.sort_unstable_by(|a, b| b.cmp(a));
             Some(idx[group.len() / 2])
         }
-        match (quorum_of(&self.voters, &matched), quorum_of(&self.outgoing, &matched)) {
+        match (
+            quorum_of(&self.voters, &matched),
+            quorum_of(&self.outgoing, &matched),
+        ) {
             (Some(a), Some(b)) => a.min(b),
             (Some(a), None) => a,
             (None, Some(b)) => b,
@@ -200,14 +211,21 @@ impl Config {
         let dec = |r: &mut Reader<'_>| -> Result<BTreeSet<NodeId>> {
             Ok(r.seq(|r| r.u32())?.into_iter().collect())
         };
-        Ok(Config { voters: dec(r)?, outgoing: dec(r)?, learners: dec(r)? })
+        Ok(Config {
+            voters: dec(r)?,
+            outgoing: dec(r)?,
+            learners: dec(r)?,
+        })
     }
 }
 
 impl fmt::Display for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let list = |s: &BTreeSet<NodeId>| {
-            s.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+            s.iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         };
         if self.is_joint() {
             write!(f, "joint[{}|{}]", list(&self.voters), list(&self.outgoing))?;
@@ -225,7 +243,10 @@ impl fmt::Display for Config {
 pub enum ConfigChange {
     /// Step into `C_old,new`. `incoming` becomes the new voter set while the
     /// current voters become `outgoing`.
-    EnterJoint { incoming: BTreeSet<NodeId>, learners: BTreeSet<NodeId> },
+    EnterJoint {
+        incoming: BTreeSet<NodeId>,
+        learners: BTreeSet<NodeId>,
+    },
     /// Step out of joint consensus into `C_new`.
     LeaveJoint,
 }
@@ -314,7 +335,12 @@ impl Snapshot {
         let last_term = r.u64()?;
         let config = Config::decode(r)?;
         let data = r.bytes()?;
-        Ok(Snapshot { last_index, last_term, config, data })
+        Ok(Snapshot {
+            last_index,
+            last_term,
+            config,
+            data,
+        })
     }
 }
 
@@ -329,8 +355,16 @@ mod tests {
     #[test]
     fn entries_round_trip() {
         let entries = vec![
-            Entry { term: 3, index: 7, kind: EntryKind::Normal(b"put a=1".to_vec()) },
-            Entry { term: 3, index: 8, kind: EntryKind::Noop },
+            Entry {
+                term: 3,
+                index: 7,
+                kind: EntryKind::Normal(b"put a=1".to_vec()),
+            },
+            Entry {
+                term: 3,
+                index: 8,
+                kind: EntryKind::Noop,
+            },
             Entry {
                 term: 4,
                 index: 9,
@@ -339,7 +373,11 @@ mod tests {
                     learners: set(&[9]),
                 }),
             },
-            Entry { term: 4, index: 10, kind: EntryKind::Config(ConfigChange::LeaveJoint) },
+            Entry {
+                term: 4,
+                index: 10,
+                kind: EntryKind::Config(ConfigChange::LeaveJoint),
+            },
         ];
         for e in &entries {
             let bytes = e.to_bytes();
@@ -437,8 +475,12 @@ mod tests {
         let buf = w.finish();
         assert_eq!(Config::decode(&mut Reader::new(&buf)).unwrap(), cfg);
 
-        let snap =
-            Snapshot { last_index: 99, last_term: 7, config: cfg, data: vec![1, 2, 3, 4] };
+        let snap = Snapshot {
+            last_index: 99,
+            last_term: 7,
+            config: cfg,
+            data: vec![1, 2, 3, 4],
+        };
         let mut w = Writer::new();
         snap.encode(&mut w);
         let buf = w.finish();

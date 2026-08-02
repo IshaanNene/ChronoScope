@@ -1,0 +1,15 @@
+chronolog is starting {{ .Values.replicas }} replicas.
+
+Watch a leader get elected:
+  kubectl exec chronolog-0 -- wget -qO- localhost:7401/debug/raft
+
+Prove it survives losing one:
+  kubectl delete pod chronolog-1
+  # /metrics chronolog_is_leader should stay 1 somewhere throughout
+
+{{- if not (mod .Values.replicas 2) }}
+
+WARNING: {{ .Values.replicas }} replicas is an even number. It tolerates no
+more failures than {{ sub .Values.replicas 1 }} would, and needs one more
+acknowledgement per commit. Use an odd count.
+{{- end }}

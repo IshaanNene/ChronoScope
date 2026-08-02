@@ -71,12 +71,16 @@ impl Model {
                 }
             }
             // --- writes -------------------------------------------------
-            (Op::Write { value, .. }, Ret::Ok) => Some(Model { value: Some(value.clone()) }),
+            (Op::Write { value, .. }, Ret::Ok) => Some(Model {
+                value: Some(value.clone()),
+            }),
             (Op::Delete { .. }, Ret::Ok) => Some(Model { value: None }),
             // --- compare and swap ---------------------------------------
             (Op::Cas { expect, value, .. }, Ret::Ok) => {
                 if expect == &self.value {
-                    Some(Model { value: value.clone() })
+                    Some(Model {
+                        value: value.clone(),
+                    })
                 } else {
                     None
                 }
@@ -94,11 +98,15 @@ impl Model {
             // The client never learned the outcome, so the return value
             // constrains nothing. The effect still has to be legal.
             (Op::Read { .. }, Ret::Unknown) => Some(self.clone()),
-            (Op::Write { value, .. }, Ret::Unknown) => Some(Model { value: Some(value.clone()) }),
+            (Op::Write { value, .. }, Ret::Unknown) => Some(Model {
+                value: Some(value.clone()),
+            }),
             (Op::Delete { .. }, Ret::Unknown) => Some(Model { value: None }),
             (Op::Cas { expect, value, .. }, Ret::Unknown) => {
                 if expect == &self.value {
-                    Some(Model { value: value.clone() })
+                    Some(Model {
+                        value: value.clone(),
+                    })
                 } else {
                     // The CAS would have failed; a failure is a legal outcome
                     // and leaves the state alone.
@@ -132,15 +140,27 @@ impl fmt::Display for Violation {
             None => "nil".to_string(),
             Some(b) => String::from_utf8_lossy(b).to_string(),
         };
-        writeln!(f, "LINEARIZABILITY VIOLATION on key {:?}", String::from_utf8_lossy(self.culprit.op.key()))?;
+        writeln!(
+            f,
+            "LINEARIZABILITY VIOLATION on key {:?}",
+            String::from_utf8_lossy(self.culprit.op.key())
+        )?;
         writeln!(f)?;
         writeln!(f, "  no valid ordering places this operation:")?;
         writeln!(f, "    {}", self.culprit)?;
         writeln!(f)?;
-        writeln!(f, "  the register held {} at that point", show(&self.model_value))?;
+        writeln!(
+            f,
+            "  the register held {} at that point",
+            show(&self.model_value)
+        )?;
         writeln!(f)?;
         if !self.linearized.is_empty() {
-            writeln!(f, "  the longest legal prefix found ({} ops):", self.linearized.len())?;
+            writeln!(
+                f,
+                "  the longest legal prefix found ({} ops):",
+                self.linearized.len()
+            )?;
             for e in self.linearized.iter().rev().take(8).rev() {
                 writeln!(f, "    {e}")?;
             }
@@ -162,7 +182,10 @@ pub enum Verdict {
     NotLinearizable(Box<Violation>),
     /// The search exceeded its budget. Not a pass and not a fail — say so
     /// rather than guessing, because reporting either would be a lie.
-    Inconclusive { explored: u64, max_concurrency: usize },
+    Inconclusive {
+        explored: u64,
+        max_concurrency: usize,
+    },
 }
 
 impl Verdict {
@@ -180,7 +203,10 @@ impl fmt::Display for Verdict {
         match self {
             Verdict::Linearizable => write!(f, "linearizable"),
             Verdict::NotLinearizable(v) => write!(f, "{v}"),
-            Verdict::Inconclusive { explored, max_concurrency } => write!(
+            Verdict::Inconclusive {
+                explored,
+                max_concurrency,
+            } => write!(
                 f,
                 "INCONCLUSIVE: exhausted the search budget after {explored} configurations \
                  (max concurrency {max_concurrency}). Neither a pass nor a fail."
@@ -199,7 +225,9 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_states: 2_000_000 }
+        Self {
+            max_states: 2_000_000,
+        }
     }
 }
 
@@ -281,13 +309,21 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
     // Explicit stack rather than recursion: a long history with wide
     // concurrency will blow a default stack, and a checker that crashes is a
     // checker nobody trusts.
-    let mut stack: Vec<Frame> =
-        vec![Frame { model: Model::new(), frontier: 0, ahead: 0, cursor: 0, chose: None }];
+    let mut stack: Vec<Frame> = vec![Frame {
+        model: Model::new(),
+        frontier: 0,
+        ahead: 0,
+        cursor: 0,
+        chose: None,
+    }];
 
     while let Some(frame) = stack.last_mut() {
         explored += 1;
         if explored > limits.max_states {
-            return Verdict::Inconclusive { explored, max_concurrency: history.max_concurrency() };
+            return Verdict::Inconclusive {
+                explored,
+                max_concurrency: history.max_concurrency(),
+            };
         }
         if frame.frontier == n {
             return Verdict::Linearizable;
@@ -330,7 +366,9 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
                 // could have observed.
                 frame.model.clone()
             } else {
-                let Some(m) = frame.model.step(&events[i]) else { continue };
+                let Some(m) = frame.model.step(&events[i]) else {
+                    continue;
+                };
                 m
             };
 
@@ -391,7 +429,10 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
     }
 
     if bounded_out {
-        return Verdict::Inconclusive { explored, max_concurrency: history.max_concurrency() };
+        return Verdict::Inconclusive {
+            explored,
+            max_concurrency: history.max_concurrency(),
+        };
     }
 
     // Every ordering was tried and none linearized the whole history.
@@ -399,8 +440,11 @@ fn check_one_key(history: &History, limits: Limits) -> Verdict {
     // The operation at the deepest frontier: everything before it was placed,
     // and no ordering gets past it.
     let culprit = events[best_depth.min(n - 1)].clone();
-    let concurrent: Vec<Event> =
-        events.iter().filter(|e| e.concurrent_with(&culprit) && **e != culprit).cloned().collect();
+    let concurrent: Vec<Event> = events
+        .iter()
+        .filter(|e| e.concurrent_with(&culprit) && **e != culprit)
+        .cloned()
+        .collect();
 
     Verdict::NotLinearizable(Box::new(Violation {
         culprit,
@@ -415,11 +459,20 @@ mod tests {
     use super::*;
 
     fn ev(client: u64, op: Op, ret: Ret, invoked: u64, returned: u64) -> Event {
-        Event { client, op, ret, invoked, returned }
+        Event {
+            client,
+            op,
+            ret,
+            invoked,
+            returned,
+        }
     }
 
     fn w(v: &str) -> Op {
-        Op::Write { key: b"k".to_vec(), value: v.as_bytes().to_vec() }
+        Op::Write {
+            key: b"k".to_vec(),
+            value: v.as_bytes().to_vec(),
+        }
     }
 
     fn r() -> Op {
@@ -514,7 +567,10 @@ mod tests {
             ev(2, r(), val("a"), 600, 700),
         ]);
         let v = check(&h, Limits::default());
-        assert!(v.is_linearizable(), "an unknown write must be placeable: {v}");
+        assert!(
+            v.is_linearizable(),
+            "an unknown write must be placeable: {v}"
+        );
     }
 
     #[test]
@@ -527,7 +583,10 @@ mod tests {
             ev(3, r(), val("a"), 600, 700),
         ]);
         let v = check(&h, Limits::default());
-        assert!(v.is_linearizable(), "an unknown write must be skippable: {v}");
+        assert!(
+            v.is_linearizable(),
+            "an unknown write must be skippable: {v}"
+        );
     }
 
     #[test]
@@ -569,7 +628,11 @@ mod tests {
         // it was nil. That is a violation even though nothing "changed".
         let h = hist(vec![ev(
             1,
-            Op::Cas { key: b"k".to_vec(), expect: None, value: Some(b"a".to_vec()) },
+            Op::Cas {
+                key: b"k".to_vec(),
+                expect: None,
+                value: Some(b"a".to_vec()),
+            },
             Ret::CasFailed,
             0,
             10,
@@ -584,7 +647,10 @@ mod tests {
         for i in 0..20u64 {
             h.push(ev(
                 1,
-                Op::Write { key: b"quiet".to_vec(), value: vec![i as u8] },
+                Op::Write {
+                    key: b"quiet".to_vec(),
+                    value: vec![i as u8],
+                },
                 Ret::Ok,
                 i * 10,
                 i * 10 + 5,
@@ -605,7 +671,7 @@ mod tests {
             h.push(ev(i, w(&format!("v{i}")), Ret::Ok, 0, 10_000));
         }
         h.push(ev(99, r(), val("v7"), 1, 9_999));
-        let started = std::time::Instant::now();
+        let started = std::time::Instant::now(); // ci-allow: measuring a test's own wall time
         let v = check(&h, Limits::default());
         assert!(v.is_linearizable(), "{v}");
         assert!(

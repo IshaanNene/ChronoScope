@@ -1,0 +1,96 @@
+# A StatefulSet, not a Deployment, and the reason is identity.
+#
+# A Raft node's id is what the cluster votes on and what its write-ahead log
+# belongs to. It must be stable across restarts and it must map to exactly one
+# volume. StatefulSet gives ordinal identity (chronolog-0, -1, -2) and a
+# PersistentVolumeClaim bound to each ordinal; a Deployment gives neither, and
+# a node that comes back with someone else's log is a split brain waiting to
+# happen.
+apiVersion: v1
+kind: Service
+metadata:
+  name: chronolog
+spec:
+  # Headless: peers resolve each other by stable per-pod DNS rather than
+  # through a load balancer. Balancing consensus traffic would be actively
+  # wrong — each message has one correct destination.
+  clusterIP: None
+  selector: { app: chronolog }
+  ports:
+    - { name: raft, port: 7400, protocol: UDP }
+    - { name: admin, port: 7401, protocol: TCP }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chronolog
+spec:
+  serviceName: chronolog
+  replicas: 3
+  podManagementPolicy: Parallel   # peers must come up together to form a quorum
+  selector:
+    matchLabels: { app: chronolog }
+  template:
+    metadata:
+      labels: { app: chronolog }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "7401"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Losing two of three at once loses the cluster, so never co-schedule.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: chronolog }
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: chronolog
+          image: ghcr.io/ishaannene/chronolog:latest
+          command:
+            - /chronolog-server
+            - --id=$(NODE_ORDINAL)
+            - --listen=0.0.0.0:7400
+            - --peer=0=chronolog-0.chronolog:7400
+            - --peer=1=chronolog-1.chronolog:7400
+            - --peer=2=chronolog-2.chronolog:7400
+            - --data-dir=/var/lib/chronolog
+            - --admin=0.0.0.0:7401
+          env:
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            # The ordinal is the node id. Deriving it from the pod name is what
+            # ties Raft identity to StatefulSet identity.
+            - name: NODE_ORDINAL
+              value: "$(POD_NAME_ORDINAL)"
+          ports:
+            - { name: raft, containerPort: 7400, protocol: UDP }
+            - { name: admin, containerPort: 7401 }
+          readinessProbe:
+            # /health is 503 when the driver loop has stopped — a node that is
+            # up, listening, and permanently stuck. Without this it stays in
+            # service indefinitely (see BUGS.md CS-002).
+            httpGet: { path: /health, port: 7401 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: 7401 }
+            periodSeconds: 15
+            failureThreshold: 4
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/chronolog }
+          resources:
+            requests: { cpu: "500m", memory: "512Mi" }
+            limits: { memory: "2Gi" }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # fsync latency is the throughput ceiling; see the bench notes.
+        storageClassName: fast-ssd
+        resources: { requests: { storage: 20Gi } }

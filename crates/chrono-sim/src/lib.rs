@@ -78,7 +78,11 @@ where
     F: FnMut(&kernel::Sim),
 {
     let mut run = |seed: u64| {
-        let sim = kernel::Sim::new(seed, fault::FaultPolicy::nemesis(), trace::TraceMode::HashOnly);
+        let sim = kernel::Sim::new(
+            seed,
+            fault::FaultPolicy::nemesis(),
+            trace::TraceMode::HashOnly,
+        );
         build(&sim);
         sim.boot_all();
         let outcome = sim.run_until(horizon);
@@ -134,8 +138,8 @@ impl std::fmt::Display for DivergenceReport {
                 f,
                 "seed {:#018x} DIVERGED\n  run A: hash {:016x} events {} time {} outcome {:?}\n  \
                  run B: hash {:016x} events {} time {} outcome {:?}\n  \
-                 Something read entropy the kernel did not provide. Usual suspects: HashMap \
-                 iteration order, Instant::now(), pointer-derived ordering, a thread.",
+                 Something read entropy the kernel did not provide. Usual suspects: hash-map \
+                 iteration order, a real system clock, pointer-derived ordering, a thread.",
                 self.seed,
                 self.hash_a,
                 self.events_a,

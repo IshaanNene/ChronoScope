@@ -13,7 +13,7 @@
 //! execution, not two similar ones.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -168,30 +168,55 @@ fn parse_seed(s: &str) -> Result<u64, String> {
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
         return u64::from_str_radix(hex, 16).map_err(|e| e.to_string());
     }
-    t.parse::<u64>().or_else(|_| u64::from_str_radix(t, 16)).map_err(|e| e.to_string())
+    t.parse::<u64>()
+        .or_else(|_| u64::from_str_radix(t, 16))
+        .map_err(|e| e.to_string())
 }
 
 fn threads(requested: usize) -> usize {
     if requested > 0 {
         return requested;
     }
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        Command::Run { seed, world, history } => cmd_run(seed, &world, history),
-        Command::Replay { seed, world, full, node, limit } => {
-            cmd_replay(seed, &world, full, node, limit)
-        }
-        Command::Check { seeds, from, world, parallel } => {
-            cmd_check(seeds, from, &world, threads(parallel))
-        }
-        Command::Swarm { seeds, from, parallel, world, out, fail_fast } => {
-            cmd_swarm(seeds, from, threads(parallel), &world, &out, fail_fast)
-        }
-        Command::Bench { seed, servers, clients, secs } => cmd_bench(seed, servers, clients, secs),
+        Command::Run {
+            seed,
+            world,
+            history,
+        } => cmd_run(seed, &world, history),
+        Command::Replay {
+            seed,
+            world,
+            full,
+            node,
+            limit,
+        } => cmd_replay(seed, &world, full, node, limit),
+        Command::Check {
+            seeds,
+            from,
+            world,
+            parallel,
+        } => cmd_check(seeds, from, &world, threads(parallel)),
+        Command::Swarm {
+            seeds,
+            from,
+            parallel,
+            world,
+            out,
+            fail_fast,
+        } => cmd_swarm(seeds, from, threads(parallel), &world, &out, fail_fast),
+        Command::Bench {
+            seed,
+            servers,
+            clients,
+            secs,
+        } => cmd_bench(seed, servers, clients, secs),
     };
     std::process::exit(code);
 }
@@ -202,7 +227,10 @@ fn main() {
 
 fn cmd_run(seed: u64, world: &World, show_history: bool) -> i32 {
     let config = world.config(seed, TraceMode::Tail(4096));
-    println!("chronoscope run  seed {seed:#018x}  policy {}", world.policy);
+    println!(
+        "chronoscope run  seed {seed:#018x}  policy {}",
+        world.policy
+    );
     println!();
     let report = scenario::run(&config);
     print!("{report}");
@@ -243,9 +271,16 @@ fn cmd_run(seed: u64, world: &World, show_history: bool) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn cmd_replay(seed: u64, world: &World, full: bool, node: Option<u32>, limit: usize) -> i32 {
-    let mode = if full { TraceMode::Full } else { TraceMode::Tail(limit.max(64) * 8) };
+    let mode = if full {
+        TraceMode::Full
+    } else {
+        TraceMode::Tail(limit.max(64) * 8)
+    };
     let config = world.config(seed, mode);
-    println!("chronoscope replay  seed {seed:#018x}  policy {}", world.policy);
+    println!(
+        "chronoscope replay  seed {seed:#018x}  policy {}",
+        world.policy
+    );
     println!();
     let report = scenario::run(&config);
 
@@ -455,7 +490,10 @@ fn cmd_swarm(
     println!("  failures        {n_failed}");
     println!("  simulated       {hours:.1} node-hours");
     println!("  wall clock      {wall:.2?}");
-    println!("  compression     {:.0}x", (hours * 3600.0) / wall.as_secs_f64().max(1e-9));
+    println!(
+        "  compression     {:.0}x",
+        (hours * 3600.0) / wall.as_secs_f64().max(1e-9)
+    );
     if n_failed > 0 {
         println!("\n  artifacts in {}/", out.display());
         1
@@ -470,7 +508,7 @@ fn first_line(s: &str) -> &str {
 
 /// A failing seed is only useful if it arrives with everything needed to
 /// reproduce it. That is the whole artifact.
-fn write_artifact(out: &PathBuf, seed: u64, world: &World, report: &RunReport, why: &str) {
+fn write_artifact(out: &Path, seed: u64, world: &World, report: &RunReport, why: &str) {
     let path = out.join(format!("seed-{seed:016x}.txt"));
     let mut buf = String::new();
     buf.push_str(&format!("# chronoscope failure: seed {seed:#018x}\n\n"));
@@ -483,7 +521,11 @@ fn write_artifact(out: &PathBuf, seed: u64, world: &World, report: &RunReport, w
         world.clients,
         world.keys,
         world.secs,
-        if world.lease_reads { " --lease-reads" } else { "" }
+        if world.lease_reads {
+            " --lease-reads"
+        } else {
+            ""
+        }
     ));
     buf.push_str("## what failed\n\n");
     buf.push_str(why);
@@ -527,8 +569,12 @@ fn cmd_bench(seed: u64, servers: u32, clients: u32, secs: u64) -> i32 {
 
     let secs_f = report.virtual_time.as_nanos() as f64 / 1e9;
     let ops = report.ops_ok as f64;
-    let mut latencies: Vec<u64> =
-        report.history.events().iter().map(|e| e.returned.saturating_sub(e.invoked)).collect();
+    let mut latencies: Vec<u64> = report
+        .history
+        .events()
+        .iter()
+        .map(|e| e.returned.saturating_sub(e.invoked))
+        .collect();
     latencies.sort_unstable();
     let pct = |p: f64| -> f64 {
         if latencies.is_empty() {
@@ -540,7 +586,10 @@ fn cmd_bench(seed: u64, servers: u32, clients: u32, secs: u64) -> i32 {
 
     println!("  writes           {}", report.ops_ok);
     println!("  simulated        {:.1}s", secs_f);
-    println!("  throughput       {:.0} writes/sec", ops / secs_f.max(1e-9));
+    println!(
+        "  throughput       {:.0} writes/sec",
+        ops / secs_f.max(1e-9)
+    );
     println!("  latency p50      {:.2} ms", pct(0.50));
     println!("  latency p99      {:.2} ms", pct(0.99));
     println!("  latency p99.9    {:.2} ms", pct(0.999));
@@ -549,6 +598,10 @@ fn cmd_bench(seed: u64, servers: u32, clients: u32, secs: u64) -> i32 {
         "  entries/fsync    {:.1}   <- group commit; 1.0 means it is not batching",
         ops / report.stats.fsyncs.max(1) as f64
     );
-    println!("  wall clock       {:.2?}  ({:.0}x real time)", report.wall_time, report.speedup());
+    println!(
+        "  wall clock       {:.2?}  ({:.0}x real time)",
+        report.wall_time,
+        report.speedup()
+    );
     0
 }

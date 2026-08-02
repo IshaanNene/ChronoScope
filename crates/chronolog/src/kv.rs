@@ -55,7 +55,10 @@ pub struct KvStore {
 
 impl KvStore {
     pub fn new() -> KvStore {
-        KvStore { keep_versions: 16, ..Default::default() }
+        KvStore {
+            keep_versions: 16,
+            ..Default::default()
+        }
     }
 
     pub fn applied_index(&self) -> Index {
@@ -63,7 +66,10 @@ impl KvStore {
     }
 
     pub fn len(&self) -> usize {
-        self.data.values().filter(|vs| vs.last().map(|v| v.value.is_some()).unwrap_or(false)).count()
+        self.data
+            .values()
+            .filter(|vs| vs.last().map(|v| v.value.is_some()).unwrap_or(false))
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -78,14 +84,20 @@ impl KvStore {
     /// The value as of `version` — the newest write at or below it.
     pub fn get_at(&self, key: &[u8], version: Index) -> Option<&[u8]> {
         let versions = self.data.get(key)?;
-        versions.iter().rev().find(|v| v.version <= version)?.value.as_deref()
+        versions
+            .iter()
+            .rev()
+            .find(|v| v.version <= version)?
+            .value
+            .as_deref()
     }
 
     /// Every live key, for debugging and the `/debug` endpoint.
     pub fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
-        self.data.iter().filter(|(_, vs)| {
-            vs.last().map(|v| v.value.is_some()).unwrap_or(false)
-        }).map(|(k, _)| k)
+        self.data
+            .iter()
+            .filter(|(_, vs)| vs.last().map(|v| v.value.is_some()).unwrap_or(false))
+            .map(|(k, _)| k)
     }
 
     fn write(&mut self, key: &[u8], value: Option<Vec<u8>>, version: Index) {
@@ -148,8 +160,13 @@ impl KvStore {
             }
         };
 
-        self.sessions
-            .insert(req.client_id, Session { last_seq: req.seq, last_outcome: outcome.clone() });
+        self.sessions.insert(
+            req.client_id,
+            Session {
+                last_seq: req.seq,
+                last_outcome: outcome.clone(),
+            },
+        );
         outcome
     }
 
@@ -219,9 +236,20 @@ impl KvStore {
             let last_seq = r.u64()?;
             let bytes = r.bytes()?;
             let resp = crate::client::Response::decode(&bytes)?;
-            sessions.insert(id, Session { last_seq, last_outcome: resp.outcome });
+            sessions.insert(
+                id,
+                Session {
+                    last_seq,
+                    last_outcome: resp.outcome,
+                },
+            );
         }
-        Ok(KvStore { data, sessions, applied, keep_versions: 16 })
+        Ok(KvStore {
+            data,
+            sessions,
+            applied,
+            keep_versions: 16,
+        })
     }
 }
 
@@ -238,18 +266,30 @@ mod tests {
         Request {
             client_id: client,
             seq,
-            op: Op::Put { key: k.as_bytes().to_vec(), value: v.as_bytes().to_vec() },
+            op: Op::Put {
+                key: k.as_bytes().to_vec(),
+                value: v.as_bytes().to_vec(),
+            },
         }
     }
 
     fn del(client: u64, seq: u64, k: &str) -> Request {
-        Request { client_id: client, seq, op: Op::Delete { key: k.as_bytes().to_vec() } }
+        Request {
+            client_id: client,
+            seq,
+            op: Op::Delete {
+                key: k.as_bytes().to_vec(),
+            },
+        }
     }
 
     #[test]
     fn puts_and_gets_round_trip() {
         let mut kv = KvStore::new();
-        assert_eq!(kv.apply(1, &put(1, 1, "a", "1")), Outcome::Applied { version: 1 });
+        assert_eq!(
+            kv.apply(1, &put(1, 1, "a", "1")),
+            Outcome::Applied { version: 1 }
+        );
         assert_eq!(kv.get(b"a"), Some(&b"1"[..]));
         assert_eq!(kv.get(b"missing"), None);
         assert_eq!(kv.applied_index(), 1);
@@ -272,9 +312,17 @@ mod tests {
         kv.apply(5, &put(1, 1, "k", "v5"));
         kv.apply(9, &put(1, 2, "k", "v9"));
         kv.apply(12, &put(1, 3, "k", "v12"));
-        assert_eq!(kv.get_at(b"k", 4), None, "before the first write the key did not exist");
+        assert_eq!(
+            kv.get_at(b"k", 4),
+            None,
+            "before the first write the key did not exist"
+        );
         assert_eq!(kv.get_at(b"k", 5), Some(&b"v5"[..]));
-        assert_eq!(kv.get_at(b"k", 8), Some(&b"v5"[..]), "no write between 5 and 9");
+        assert_eq!(
+            kv.get_at(b"k", 8),
+            Some(&b"v5"[..]),
+            "no write between 5 and 9"
+        );
         assert_eq!(kv.get_at(b"k", 11), Some(&b"v9"[..]));
         assert_eq!(kv.get_at(b"k", 99), Some(&b"v12"[..]));
         assert_eq!(kv.get(b"k"), Some(&b"v12"[..]));
@@ -287,7 +335,11 @@ mod tests {
             kv.apply(i, &put(1, i, "k", &format!("v{i}")));
         }
         assert_eq!(kv.get(b"k"), Some(&b"v100"[..]));
-        assert_eq!(kv.data[&b"k".to_vec()].len(), 16, "MVCC history must not grow unbounded");
+        assert_eq!(
+            kv.data[&b"k".to_vec()].len(),
+            16,
+            "MVCC history must not grow unbounded"
+        );
     }
 
     #[test]
@@ -297,15 +349,25 @@ mod tests {
         let create = Request {
             client_id: 1,
             seq: 1,
-            op: Op::Cas { key: b"k".to_vec(), expect: None, value: Some(b"first".to_vec()) },
+            op: Op::Cas {
+                key: b"k".to_vec(),
+                expect: None,
+                value: Some(b"first".to_vec()),
+            },
         };
         assert_eq!(kv.apply(1, &create), Outcome::Applied { version: 1 });
 
         // The same CAS again must fail, and report what is actually there.
-        let again = Request { client_id: 2, seq: 1, ..create.clone() };
+        let again = Request {
+            client_id: 2,
+            seq: 1,
+            ..create.clone()
+        };
         assert_eq!(
             kv.apply(2, &again),
-            Outcome::CasFailed { actual: Some(b"first".to_vec()) }
+            Outcome::CasFailed {
+                actual: Some(b"first".to_vec())
+            }
         );
 
         let swap = Request {
@@ -335,7 +397,11 @@ mod tests {
         let second = kv.apply(11, &req);
         assert_eq!(second, first, "a retry must return the remembered response");
         // And crucially, no new version was written.
-        assert_eq!(kv.data[&b"counter".to_vec()].len(), 1, "the retry must not write again");
+        assert_eq!(
+            kv.data[&b"counter".to_vec()].len(),
+            1,
+            "the retry must not write again"
+        );
         assert_eq!(kv.get_at(b"counter", 10), Some(&b"incremented"[..]));
     }
 
@@ -348,7 +414,11 @@ mod tests {
         let cas = Request {
             client_id: 4,
             seq: 1,
-            op: Op::Cas { key: b"k".to_vec(), expect: None, value: Some(b"mine".to_vec()) },
+            op: Op::Cas {
+                key: b"k".to_vec(),
+                expect: None,
+                value: Some(b"mine".to_vec()),
+            },
         };
         assert_eq!(kv.apply(1, &cas), Outcome::Applied { version: 1 });
         assert_eq!(
@@ -366,7 +436,11 @@ mod tests {
         // seq 1 arriving after seq 2 must not resurrect the old value.
         let out = kv.apply(3, &put(1, 1, "a", "1"));
         assert_eq!(out, Outcome::Unavailable);
-        assert_eq!(kv.get(b"a"), Some(&b"2"[..]), "a stale retry must not overwrite");
+        assert_eq!(
+            kv.get(b"a"),
+            Some(&b"2"[..]),
+            "a stale retry must not overwrite"
+        );
     }
 
     #[test]
@@ -374,7 +448,10 @@ mod tests {
         let mut kv = KvStore::new();
         kv.apply(1, &put(1, 1, "a", "from-1"));
         // Client 2's seq 1 is unrelated and must apply normally.
-        assert_eq!(kv.apply(2, &put(2, 1, "b", "from-2")), Outcome::Applied { version: 2 });
+        assert_eq!(
+            kv.apply(2, &put(2, 1, "b", "from-2")),
+            Outcome::Applied { version: 2 }
+        );
         assert_eq!(kv.get(b"b"), Some(&b"from-2"[..]));
     }
 
@@ -391,10 +468,17 @@ mod tests {
 
         assert_eq!(restored.applied_index(), kv.applied_index());
         for k in kv.keys() {
-            assert_eq!(restored.get(k), kv.get(k), "key {k:?} differs after restore");
+            assert_eq!(
+                restored.get(k),
+                kv.get(k),
+                "key {k:?} differs after restore"
+            );
         }
         assert_eq!(restored.get(b"k1"), None, "the tombstone must survive");
-        assert_eq!(restored.sessions, kv.sessions, "the session table is part of the snapshot");
+        assert_eq!(
+            restored.sessions, kv.sessions,
+            "the session table is part of the snapshot"
+        );
     }
 
     #[test]

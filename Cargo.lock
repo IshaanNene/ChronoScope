@@ -74,6 +74,11 @@ dependencies = [
 [[package]]
 name = "chronolog-server"
 version = "0.1.0"
+dependencies = [
+ "chrono-sim",
+ "chronolog",
+ "clap",
+]
 
 [[package]]
 name = "chronoscope"

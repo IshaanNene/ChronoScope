@@ -72,7 +72,10 @@ pub struct WalOptions {
 
 impl Default for WalOptions {
     fn default() -> Self {
-        Self { segment_bytes: 1 << 20, compact_slack_bytes: 1 << 18 }
+        Self {
+            segment_bytes: 1 << 20,
+            compact_slack_bytes: 1 << 18,
+        }
     }
 }
 
@@ -250,7 +253,10 @@ impl Wal {
             if first_index != expected_first && !entries.is_empty() {
                 // A gap between segments. Everything from here on is
                 // unreachable; stop and let the leader refill.
-                tail = TailReason::IndexGap { expected: expected_first, found: first_index };
+                tail = TailReason::IndexGap {
+                    expected: expected_first,
+                    found: first_index,
+                };
                 let _ = storage.remove(&name).await;
                 continue;
             }
@@ -310,7 +316,14 @@ impl Wal {
         }
         wal.stats.truncations = truncated;
 
-        Ok(Recovered { wal, hard_state, snapshot, entries, tail, truncated })
+        Ok(Recovered {
+            wal,
+            hard_state,
+            snapshot,
+            entries,
+            tail,
+            truncated,
+        })
     }
 
     pub fn stats(&self) -> WalStats {
@@ -393,7 +406,10 @@ impl Wal {
 
             let body = entry.to_bytes();
             let record = frame(&body);
-            let seg = self.segments.last_mut().expect("always at least one segment");
+            let seg = self
+                .segments
+                .last_mut()
+                .expect("always at least one segment");
             let at = seg.size;
             seg.file.write_at(at, record.clone()).await?;
             seg.offsets.push(at);
@@ -589,7 +605,9 @@ impl Wal {
             return Ok(None);
         };
         let slot = (index - seg.first_index) as usize;
-        let Some(&at) = seg.offsets.get(slot) else { return Ok(None) };
+        let Some(&at) = seg.offsets.get(slot) else {
+            return Ok(None);
+        };
         let header = seg.file.read_at(at, HEADER).await?;
         if header.len() < HEADER {
             return Ok(None);
@@ -656,7 +674,10 @@ async fn scan_segment(
             break TailReason::Undecodable;
         };
         if entry.index != expected {
-            break TailReason::IndexGap { expected, found: entry.index };
+            break TailReason::IndexGap {
+                expected,
+                found: entry.index,
+            };
         }
         expected = entry.index + 1;
         entries.push(entry);
@@ -669,7 +690,9 @@ async fn read_hard_state(file: &Arc<dyn File>) -> (HardState, u64) {
     let mut best = (HardState::default(), 0u64);
     for slot in 0..2u64 {
         let at = slot * STATE_SLOT;
-        let Ok(header) = file.read_at(at, HEADER).await else { continue };
+        let Ok(header) = file.read_at(at, HEADER).await else {
+            continue;
+        };
         if header.len() < HEADER {
             continue;
         }
@@ -678,13 +701,19 @@ async fn read_hard_state(file: &Arc<dyn File>) -> (HardState, u64) {
         if len == 0 || len > 256 {
             continue;
         }
-        let Ok(body) = file.read_at(at + HEADER as u64, len as usize).await else { continue };
+        let Ok(body) = file.read_at(at + HEADER as u64, len as usize).await else {
+            continue;
+        };
         if body.len() != len as usize || crc32c(&body) != crc {
             continue;
         }
         let mut r = Reader::new(&body);
-        let (Ok(seq), Ok(term), Ok(commit)) = (r.u64(), r.u64(), r.u64()) else { continue };
-        let Ok(vote) = r.opt(|r| r.u32()) else { continue };
+        let (Ok(seq), Ok(term), Ok(commit)) = (r.u64(), r.u64(), r.u64()) else {
+            continue;
+        };
+        let Ok(vote) = r.opt(|r| r.u32()) else {
+            continue;
+        };
         // Highest sequence number wins: that is the most recent write that
         // completed. A torn newer slot simply fails its CRC and the older one
         // is used, which is the whole reason for two slots.

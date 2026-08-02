@@ -46,7 +46,9 @@ pub struct Xoshiro256ss {
 impl Xoshiro256ss {
     pub fn from_seed(seed: u64) -> Self {
         let mut sm = SplitMix64::new(seed);
-        Self { s: [sm.next_u64(), sm.next_u64(), sm.next_u64(), sm.next_u64()] }
+        Self {
+            s: [sm.next_u64(), sm.next_u64(), sm.next_u64(), sm.next_u64()],
+        }
     }
 
     #[inline]
@@ -65,8 +67,12 @@ impl Xoshiro256ss {
     /// Jump 2^128 steps. Used to hand each node an independent, non-overlapping
     /// substream so that adding a node does not perturb the others' draws.
     pub fn jump(&mut self) {
-        const JUMP: [u64; 4] =
-            [0x180E_C6D3_3CFD_0ABA, 0xD5A6_1266_F0C9_392C, 0xA958_2618_E03F_C9AA, 0x39AB_DC45_29B1_661C];
+        const JUMP: [u64; 4] = [
+            0x180E_C6D3_3CFD_0ABA,
+            0xD5A6_1266_F0C9_392C,
+            0xA958_2618_E03F_C9AA,
+            0x39AB_DC45_29B1_661C,
+        ];
         let mut s = [0u64; 4];
         for &j in JUMP.iter() {
             for b in 0..64 {
@@ -96,11 +102,15 @@ pub struct SeededRng {
 
 impl SeededRng {
     pub fn new(seed: u64) -> Self {
-        Self { inner: Mutex::new(Xoshiro256ss::from_seed(seed)) }
+        Self {
+            inner: Mutex::new(Xoshiro256ss::from_seed(seed)),
+        }
     }
 
     pub fn from_state(state: Xoshiro256ss) -> Self {
-        Self { inner: Mutex::new(state) }
+        Self {
+            inner: Mutex::new(state),
+        }
     }
 
     /// Fork an independent substream. The child is 2^128 steps ahead, so the
@@ -225,7 +235,10 @@ pub struct LatencyDist {
 
 impl LatencyDist {
     pub fn new(buckets: Vec<(u32, u64, u64)>) -> Self {
-        assert!(!buckets.is_empty(), "latency distribution needs at least one bucket");
+        assert!(
+            !buckets.is_empty(),
+            "latency distribution needs at least one bucket"
+        );
         Self { buckets }
     }
 
@@ -242,9 +255,9 @@ impl LatencyDist {
     /// A same-rack link: sub-millisecond, with a thin tail.
     pub fn datacenter() -> Self {
         Self::new(vec![
-            (900, 150_000, 900_000),        // 150us - 900us
-            (95, 900_000, 8_000_000),       // 900us - 8ms
-            (5, 8_000_000, 120_000_000),    // 8ms - 120ms, the ugly tail
+            (900, 150_000, 900_000),     // 150us - 900us
+            (95, 900_000, 8_000_000),    // 900us - 8ms
+            (5, 8_000_000, 120_000_000), // 8ms - 120ms, the ugly tail
         ])
     }
 
@@ -311,7 +324,10 @@ mod tests {
             assert!(v < 5);
             seen[v as usize] = true;
         }
-        assert!(seen.iter().all(|&s| s), "every value in range should appear");
+        assert!(
+            seen.iter().all(|&s| s),
+            "every value in range should appear"
+        );
     }
 
     #[test]
@@ -325,8 +341,13 @@ mod tests {
     fn weighted_index_respects_weights() {
         let r = SeededRng::new(11);
         let weights = [1u32, 99];
-        let hits = (0..2000).filter(|_| r.weighted_index(&weights) == 1).count();
-        assert!(hits > 1900, "the 99% bucket should dominate, got {hits}/2000");
+        let hits = (0..2000)
+            .filter(|_| r.weighted_index(&weights) == 1)
+            .count();
+        assert!(
+            hits > 1900,
+            "the 99% bucket should dominate, got {hits}/2000"
+        );
     }
 
     #[test]

@@ -178,8 +178,11 @@ impl Invariants {
     /// **Log Matching** (§5.3): if two logs hold an entry with the same index
     /// and term, they are identical in every preceding entry.
     fn log_matching(&mut self, view: &ClusterView) {
-        let nodes: Vec<(&NodeId, &PublicState)> =
-            view.nodes.iter().filter(|(_, s)| !s.log_terms.is_empty()).collect();
+        let nodes: Vec<(&NodeId, &PublicState)> = view
+            .nodes
+            .iter()
+            .filter(|(_, s)| !s.log_terms.is_empty())
+            .collect();
         for i in 0..nodes.len() {
             for j in (i + 1)..nodes.len() {
                 let (a_id, a) = nodes[i];
@@ -225,8 +228,11 @@ impl Invariants {
     /// up by snapshot. See `chronolog::node::ApplyDigest` for why a cumulative
     /// chain would produce a false positive on every snapshot install.
     fn state_machine_safety(&mut self, view: &ClusterView) {
-        let nodes: Vec<(&NodeId, &PublicState)> =
-            view.nodes.iter().filter(|(_, s)| !s.apply_checkpoints.is_empty()).collect();
+        let nodes: Vec<(&NodeId, &PublicState)> = view
+            .nodes
+            .iter()
+            .filter(|(_, s)| !s.apply_checkpoints.is_empty())
+            .collect();
         for i in 0..nodes.len() {
             for j in (i + 1)..nodes.len() {
                 let (a_id, a) = nodes[i];
@@ -317,7 +323,11 @@ impl Invariants {
 impl fmt::Display for Invariants {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.violations.is_empty() {
-            write!(f, "all Raft safety invariants held across {} checks", self.checks)
+            write!(
+                f,
+                "all Raft safety invariants held across {} checks",
+                self.checks
+            )
         } else {
             for v in &self.violations {
                 writeln!(f, "{v}")?;
@@ -332,11 +342,18 @@ mod tests {
     use super::*;
 
     fn node(id: NodeId, role: &'static str, term: Term) -> PublicState {
-        PublicState { node: id, role, term, ..Default::default() }
+        PublicState {
+            node: id,
+            role,
+            term,
+            ..Default::default()
+        }
     }
 
     fn view(states: Vec<PublicState>) -> ClusterView {
-        ClusterView { nodes: states.into_iter().map(|s| (s.node, s)).collect() }
+        ClusterView {
+            nodes: states.into_iter().map(|s| (s.node, s)).collect(),
+        }
     }
 
     #[test]
@@ -467,6 +484,10 @@ mod tests {
         for _ in 0..100 {
             inv.check(&view(vec![node(0, "leader", 5), node(1, "leader", 5)]));
         }
-        assert_eq!(inv.violations().len(), 1, "repeated failures must not bury the first");
+        assert_eq!(
+            inv.violations().len(),
+            1,
+            "repeated failures must not bury the first"
+        );
     }
 }

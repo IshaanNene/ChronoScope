@@ -1,0 +1,23 @@
+image:
+  repository: ghcr.io/ishaannene/chronolog
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Odd numbers only. Consensus needs a majority, and an even cluster tolerates
+# no more failures than the odd one below it while needing one more ack per
+# commit — 4 nodes tolerate 1 failure, same as 3, and are strictly slower.
+replicas: 3
+
+storage:
+  class: fast-ssd
+  size: 20Gi
+
+raft:
+  tickMs: 50
+  # Off by default: lease reads are not linearizable under clock skew, and the
+  # simulator demonstrates that rather than assuming it.
+  leaseReads: false
+
+resources:
+  requests: { cpu: 500m, memory: 512Mi }
+  limits: { memory: 2Gi }

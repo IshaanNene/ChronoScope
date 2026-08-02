@@ -43,8 +43,9 @@ impl Cluster {
 
     fn with_opts(n: u32, opts: RaftOptions) -> Cluster {
         let cfg = Config::simple(0..n);
-        let nodes: BTreeMap<NodeId, Raft> =
-            (0..n).map(|id| (id, Raft::new(id, cfg.clone(), opts.clone()))).collect();
+        let nodes: BTreeMap<NodeId, Raft> = (0..n)
+            .map(|id| (id, Raft::new(id, cfg.clone(), opts.clone())))
+            .collect();
         let applied = (0..n).map(|id| (id, Vec::new())).collect();
         let reads = (0..n).map(|id| (id, Vec::new())).collect();
         Cluster {
@@ -118,7 +119,10 @@ impl Cluster {
         for id in ids {
             // A fixed but per-node-varying value; the state machine stirs it,
             // so elections still randomize.
-            let r = self.tick_count.wrapping_mul(6364136223846793005).wrapping_add(id as u64);
+            let r = self
+                .tick_count
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(id as u64);
             self.nodes.get_mut(&id).unwrap().tick(r);
         }
     }
@@ -136,7 +140,11 @@ impl Cluster {
     }
 
     fn leaders(&self) -> Vec<NodeId> {
-        self.nodes.values().filter(|r| r.is_leader()).map(|r| r.id).collect()
+        self.nodes
+            .values()
+            .filter(|r| r.is_leader())
+            .map(|r| r.id)
+            .collect()
     }
 
     fn partition(&mut self, a: &[NodeId], b: &[NodeId]) {
@@ -269,7 +277,11 @@ fn a_fresh_cluster_elects_exactly_one_leader() {
     // Everyone else must agree who it is.
     for id in 0..3u32 {
         if id != leader {
-            assert_eq!(c.get(id).leader(), Some(leader), "n{id} disagrees about the leader");
+            assert_eq!(
+                c.get(id).leader(),
+                Some(leader),
+                "n{id} disagrees about the leader"
+            );
             assert_eq!(c.get(id).role(), Role::Follower);
         }
     }
@@ -285,7 +297,9 @@ fn a_leader_commits_a_noop_of_its_own_term() {
     c.run(5);
     let applied = &c.applied[&leader];
     assert!(
-        applied.iter().any(|e| matches!(e.kind, EntryKind::Noop) && e.term == c.get(leader).term()),
+        applied
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Noop) && e.term == c.get(leader).term()),
         "a new leader must commit a no-op of its own term, applied: {applied:?}"
     );
 }
@@ -295,10 +309,17 @@ fn a_single_node_cluster_elects_itself_and_commits_immediately() {
     let mut c = Cluster::new(1);
     let leader = c.elect();
     assert_eq!(leader, 0);
-    let idx = c.propose(&cmd("x=1")).expect("single node must accept proposals");
+    let idx = c
+        .propose(&cmd("x=1"))
+        .expect("single node must accept proposals");
     c.run(2);
-    assert!(c.get(0).commit_index() >= idx, "a lone voter is its own quorum");
-    assert!(c.applied[&0].iter().any(|e| e.kind == EntryKind::Normal(cmd("x=1"))));
+    assert!(
+        c.get(0).commit_index() >= idx,
+        "a lone voter is its own quorum"
+    );
+    assert!(c.applied[&0]
+        .iter()
+        .any(|e| e.kind == EntryKind::Normal(cmd("x=1"))));
 }
 
 #[test]
@@ -314,7 +335,10 @@ fn a_minority_partition_cannot_elect_a_leader() {
     c.run(60);
 
     for &id in &minority {
-        assert!(!c.get(id).is_leader(), "n{id} in a 2-of-5 minority must not become leader");
+        assert!(
+            !c.get(id).is_leader(),
+            "n{id} in a 2-of-5 minority must not become leader"
+        );
     }
     assert!(c.leaders().len() <= 1);
     c.check_all();
@@ -333,10 +357,12 @@ fn a_majority_partition_elects_a_new_leader_when_the_old_one_is_cut_off() {
     c.run(80);
 
     let new_leader = majority.iter().find(|&&id| c.get(id).is_leader());
-    assert!(new_leader.is_some(), "a 3-of-5 majority must be able to elect");
     assert!(
-        c.get(*new_leader.unwrap()).term() > c.get(old).term()
-            || !c.get(old).is_leader(),
+        new_leader.is_some(),
+        "a 3-of-5 majority must be able to elect"
+    );
+    assert!(
+        c.get(*new_leader.unwrap()).term() > c.get(old).term() || !c.get(old).is_leader(),
         "the new leader must be in a later term than the deposed one"
     );
     c.check_all();
@@ -364,7 +390,10 @@ fn a_candidate_with_a_stale_log_cannot_win() {
 
     let stale_last = c.get(stale).last_index();
     let leader_last = c.get(leader).last_index();
-    assert!(stale_last < leader_last, "the isolated node should have fallen behind");
+    assert!(
+        stale_last < leader_last,
+        "the isolated node should have fallen behind"
+    );
 
     // Heal, and hand the stale node a huge term so it campaigns immediately.
     c.heal();
@@ -388,7 +417,10 @@ fn pre_vote_stops_a_partitioned_node_from_disrupting_the_cluster() {
     // The disruptive rejoin: a node partitioned away campaigns repeatedly,
     // incrementing its term each time. On rejoining, a higher term alone would
     // force a perfectly healthy leader to step down. Pre-vote asks first.
-    let opts = RaftOptions { pre_vote: true, ..RaftOptions::default() };
+    let opts = RaftOptions {
+        pre_vote: true,
+        ..RaftOptions::default()
+    };
     let mut c = Cluster::with_opts(5, opts);
     let leader = c.elect();
     c.run(10);
@@ -415,7 +447,10 @@ fn pre_vote_stops_a_partitioned_node_from_disrupting_the_cluster() {
         settled_term,
         "the healthy leader must survive the rejoin without a term bump"
     );
-    assert!(c.get(leader).is_leader(), "the leader must not have been deposed");
+    assert!(
+        c.get(leader).is_leader(),
+        "the leader must not have been deposed"
+    );
     c.check_all();
 }
 
@@ -424,7 +459,10 @@ fn without_pre_vote_the_same_rejoin_does_disrupt() {
     // The control for the test above: turn pre-vote off and the disruption is
     // real. This is what makes the previous test evidence rather than a
     // tautology.
-    let opts = RaftOptions { pre_vote: false, ..RaftOptions::default() };
+    let opts = RaftOptions {
+        pre_vote: false,
+        ..RaftOptions::default()
+    };
     let mut c = Cluster::with_opts(5, opts);
     let leader = c.elect();
     c.run(10);
@@ -511,7 +549,11 @@ fn a_conflicting_suffix_is_overwritten_by_the_new_leader() {
 
     // The majority elects someone else and does real work.
     c.run(60);
-    let new_leader = rest.iter().copied().find(|&id| c.get(id).is_leader()).expect("new leader");
+    let new_leader = rest
+        .iter()
+        .copied()
+        .find(|&id| c.get(id).is_leader())
+        .expect("new leader");
     for i in 0..8 {
         let l = new_leader;
         c.get_mut(l).propose(cmd(&format!("real{i}")));
@@ -527,7 +569,10 @@ fn a_conflicting_suffix_is_overwritten_by_the_new_leader() {
         .iter()
         .filter(|e| matches!(&e.kind, EntryKind::Normal(d) if d.starts_with(b"orphan")))
         .count();
-    assert_eq!(applied_orphans, 0, "uncommitted entries must never be applied");
+    assert_eq!(
+        applied_orphans, 0,
+        "uncommitted entries must never be applied"
+    );
     for id in 0..3u32 {
         assert_eq!(c.get(id).last_index(), c.get(new_leader).last_index());
     }
@@ -576,7 +621,11 @@ fn conflict_hints_back_up_a_whole_term_per_round_trip() {
             break;
         }
     }
-    assert_eq!(c.get(behind).last_index(), c.get(leader).last_index(), "never caught up");
+    assert_eq!(
+        c.get(behind).last_index(),
+        c.get(leader).last_index(),
+        "never caught up"
+    );
     assert!(
         appends < 60,
         "catching up 300 entries took {appends} AppendEntries; the conflict hint is not working"
@@ -597,7 +646,10 @@ fn an_entry_from_a_previous_term_is_not_committed_by_replication_count_alone() {
     // Constructed directly rather than by scenario, because the interleaving
     // that produces it naturally is vanishingly rare — which is exactly why
     // implementations get it wrong.
-    let opts = RaftOptions { pre_vote: false, ..RaftOptions::default() };
+    let opts = RaftOptions {
+        pre_vote: false,
+        ..RaftOptions::default()
+    };
     let mut c = Cluster::with_opts(3, opts);
 
     // n0 leads term 1 and replicates one entry to n1 only.
@@ -612,7 +664,10 @@ fn an_entry_from_a_previous_term_is_not_committed_by_replication_count_alone() {
     let idx = c.get(leader).last_index();
     let commit_before = c.get(leader).commit_index();
     // It is on the leader and on `a` — a majority of three.
-    assert!(c.get(a).last_index() >= idx, "the entry should be on a majority");
+    assert!(
+        c.get(a).last_index() >= idx,
+        "the entry should be on a majority"
+    );
     assert!(
         commit_before >= idx || c.get(leader).term() == t,
         "sanity: still in the original term"
@@ -653,7 +708,10 @@ fn commit_index_never_moves_backwards() {
         for id in 0..5u32 {
             let ci = c.get(id).commit_index();
             let prev = high.get(&id).copied().unwrap_or(0);
-            assert!(ci >= prev, "n{id} commit index went backwards: {prev} -> {ci}");
+            assert!(
+                ci >= prev,
+                "n{id} commit index went backwards: {prev} -> {ci}"
+            );
             high.insert(id, ci);
         }
         c.check_all();
@@ -676,7 +734,8 @@ fn joint_consensus_adds_a_node_and_completes() {
     // Introduce n3 and n4 as full voters via a joint transition.
     let opts = RaftOptions::default();
     for id in 3..5u32 {
-        c.nodes.insert(id, Raft::new(id, Config::simple(0..3), opts.clone()));
+        c.nodes
+            .insert(id, Raft::new(id, Config::simple(0..3), opts.clone()));
         c.applied.insert(id, Vec::new());
         c.reads.insert(id, Vec::new());
     }
@@ -686,7 +745,10 @@ fn joint_consensus_adds_a_node_and_completes() {
     };
     assert!(c.get_mut(leader).propose_config(change).is_some());
     c.settle();
-    assert!(c.get(leader).config().is_joint(), "the leader must enter the joint configuration");
+    assert!(
+        c.get(leader).config().is_joint(),
+        "the leader must enter the joint configuration"
+    );
 
     // Drive to completion: the leader proposes LeaveJoint once EnterJoint commits.
     for _ in 0..80 {
@@ -744,12 +806,15 @@ fn a_joint_configuration_needs_both_majorities_to_commit() {
     let leader = c.elect();
     c.run(3);
     for id in 3..6u32 {
-        c.nodes.insert(id, Raft::new(id, Config::simple(0..3), opts.clone()));
+        c.nodes
+            .insert(id, Raft::new(id, Config::simple(0..3), opts.clone()));
         c.applied.insert(id, Vec::new());
         c.reads.insert(id, Vec::new());
     }
-    let change =
-        ConfigChange::EnterJoint { incoming: (3..6u32).collect(), learners: BTreeSet::new() };
+    let change = ConfigChange::EnterJoint {
+        incoming: (3..6u32).collect(),
+        learners: BTreeSet::new(),
+    };
     c.get_mut(leader).propose_config(change).unwrap();
     c.settle();
     assert!(c.get(leader).config().is_joint());
@@ -829,7 +894,10 @@ fn read_index_requires_a_quorum_confirmation() {
     c.propose(&cmd("k=v")).unwrap();
     c.run(3);
 
-    let ctx = c.get_mut(leader).read_index().expect("the leader can start a read");
+    let ctx = c
+        .get_mut(leader)
+        .read_index()
+        .expect("the leader can start a read");
     // Drain the leader's Ready — this queues the confirmation heartbeats onto
     // the wire without delivering them yet.
     c.pump(leader);
@@ -843,7 +911,10 @@ fn read_index_requires_a_quorum_confirmation() {
         .iter()
         .find(|r| r.ctx == ctx)
         .expect("the read must become serviceable once a quorum answers");
-    assert!(state.index >= 1, "the read index must be at least the committed write");
+    assert!(
+        state.index >= 1,
+        "the read index must be at least the committed write"
+    );
 }
 
 #[test]
@@ -876,7 +947,10 @@ fn a_leader_cannot_serve_a_read_before_committing_in_its_own_term() {
     c.partition(&[leader], &rest);
     let mut fresh = Raft::new(9, Config::simple([9, 10, 11]), RaftOptions::default());
     // A node that has not yet committed anything of its own term refuses.
-    assert!(fresh.read_index().is_none(), "a non-leader must refuse a read");
+    assert!(
+        fresh.read_index().is_none(),
+        "a non-leader must refuse a read"
+    );
     let _ = (leader, rest);
 }
 
@@ -893,7 +967,11 @@ fn leadership_transfers_on_request() {
     assert!(c.get_mut(leader).transfer_leadership(target));
     c.settle();
     c.run(10);
-    assert_eq!(c.leader(), Some(target), "leadership should have moved to n{target}");
+    assert_eq!(
+        c.leader(),
+        Some(target),
+        "leadership should have moved to n{target}"
+    );
     c.check_all();
 }
 
@@ -926,7 +1004,11 @@ fn a_restarted_node_remembers_its_term_and_vote() {
     assert_eq!(restored.term(), hard.term, "term must survive a restart");
     assert_eq!(restored.vote(), hard.vote, "a vote must survive a restart");
     assert_eq!(restored.last_index(), entries.last().unwrap().index);
-    assert_eq!(restored.role(), Role::Follower, "a restarted node starts as a follower");
+    assert_eq!(
+        restored.role(),
+        Role::Follower,
+        "a restarted node starts as a follower"
+    );
 }
 
 #[test]
@@ -935,12 +1017,31 @@ fn a_recovered_commit_index_is_clamped_to_what_the_log_actually_holds() {
     // a higher commit index. Trusting it would turn a storage fault into a
     // safety violation: the node would report entries committed that it does
     // not have, and could then serve them as a leader.
-    let entries: Vec<Entry> =
-        (1..=5).map(|i| Entry { term: 1, index: i, kind: EntryKind::Noop }).collect();
-    let hard = HardState { term: 3, vote: Some(1), commit: 99 };
-    let r =
-        Raft::restore(0, RaftOptions::default(), hard, None, entries, Config::simple(0..3));
-    assert_eq!(r.commit_index(), 5, "commit must be clamped to the last entry actually present");
+    let entries: Vec<Entry> = (1..=5)
+        .map(|i| Entry {
+            term: 1,
+            index: i,
+            kind: EntryKind::Noop,
+        })
+        .collect();
+    let hard = HardState {
+        term: 3,
+        vote: Some(1),
+        commit: 99,
+    };
+    let r = Raft::restore(
+        0,
+        RaftOptions::default(),
+        hard,
+        None,
+        entries,
+        Config::simple(0..3),
+    );
+    assert_eq!(
+        r.commit_index(),
+        5,
+        "commit must be clamped to the last entry actually present"
+    );
 }
 
 #[test]
@@ -951,9 +1052,18 @@ fn restoring_from_a_snapshot_sets_the_applied_point() {
         config: Config::simple(0..3),
         data: b"image".to_vec(),
     };
-    let entries: Vec<Entry> =
-        (41..=45).map(|i| Entry { term: 3, index: i, kind: EntryKind::Noop }).collect();
-    let hard = HardState { term: 3, vote: None, commit: 43 };
+    let entries: Vec<Entry> = (41..=45)
+        .map(|i| Entry {
+            term: 3,
+            index: i,
+            kind: EntryKind::Noop,
+        })
+        .collect();
+    let hard = HardState {
+        term: 3,
+        vote: None,
+        commit: 43,
+    };
     let r = Raft::restore(
         0,
         RaftOptions::default(),
@@ -962,7 +1072,11 @@ fn restoring_from_a_snapshot_sets_the_applied_point() {
         entries,
         Config::simple(0..3),
     );
-    assert_eq!(r.applied_index(), 40, "everything up to the snapshot is already applied");
+    assert_eq!(
+        r.applied_index(),
+        40,
+        "everything up to the snapshot is already applied"
+    );
     assert_eq!(r.commit_index(), 43);
     assert_eq!(r.last_index(), 45);
     assert_eq!(r.log().term_at(40), Some(3));

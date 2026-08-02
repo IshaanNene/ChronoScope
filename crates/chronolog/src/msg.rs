@@ -29,11 +29,21 @@ pub enum Body {
     /// forces a healthy leader to step down purely by having a higher term.
     /// A pre-vote asks "would you vote for me?" without anyone changing term,
     /// so a node with no chance of winning cannot disturb a working cluster.
-    PreVoteReq { last_index: Index, last_term: Term },
-    PreVoteResp { granted: bool },
+    PreVoteReq {
+        last_index: Index,
+        last_term: Term,
+    },
+    PreVoteResp {
+        granted: bool,
+    },
 
-    VoteReq { last_index: Index, last_term: Term },
-    VoteResp { granted: bool },
+    VoteReq {
+        last_index: Index,
+        last_term: Term,
+    },
+    VoteResp {
+        granted: bool,
+    },
 
     // --- replication ----------------------------------------------------
     AppendReq {
@@ -53,14 +63,24 @@ pub enum Body {
     },
 
     // --- snapshots ------------------------------------------------------
-    SnapshotReq { snapshot: Snapshot },
-    SnapshotResp { success: bool, index: Index },
+    SnapshotReq {
+        snapshot: Snapshot,
+    },
+    SnapshotResp {
+        success: bool,
+        index: Index,
+    },
 
     // --- linearizable reads ---------------------------------------------
     /// A heartbeat carrying an opaque context, used to confirm leadership for
     /// a `ReadIndex` without appending anything to the log.
-    HeartbeatReq { commit: Index, ctx: u64 },
-    HeartbeatResp { ctx: u64 },
+    HeartbeatReq {
+        commit: Index,
+        ctx: u64,
+    },
+    HeartbeatResp {
+        ctx: u64,
+    },
 
     // --- leadership transfer --------------------------------------------
     /// Instructs the target to start an election immediately, skipping its
@@ -77,31 +97,54 @@ impl Message {
     /// follower". Treating them as term-bearing would defeat the entire point
     /// of pre-vote, since the poll is sent at `term + 1`.
     pub fn is_pre_vote(&self) -> bool {
-        matches!(self.body, Body::PreVoteReq { .. } | Body::PreVoteResp { .. })
+        matches!(
+            self.body,
+            Body::PreVoteReq { .. } | Body::PreVoteResp { .. }
+        )
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::with_capacity(64);
         w.u64(self.term);
         match &self.body {
-            Body::PreVoteReq { last_index, last_term } => {
+            Body::PreVoteReq {
+                last_index,
+                last_term,
+            } => {
                 w.u8(1).u64(*last_index).u64(*last_term);
             }
             Body::PreVoteResp { granted } => {
                 w.u8(2).bool(*granted);
             }
-            Body::VoteReq { last_index, last_term } => {
+            Body::VoteReq {
+                last_index,
+                last_term,
+            } => {
                 w.u8(3).u64(*last_index).u64(*last_term);
             }
             Body::VoteResp { granted } => {
                 w.u8(4).bool(*granted);
             }
-            Body::AppendReq { prev_index, prev_term, entries, commit } => {
+            Body::AppendReq {
+                prev_index,
+                prev_term,
+                entries,
+                commit,
+            } => {
                 w.u8(5).u64(*prev_index).u64(*prev_term).u64(*commit);
                 w.seq(entries, |w, e| e.encode(w));
             }
-            Body::AppendResp { success, match_index, conflict_index, conflict_term } => {
-                w.u8(6).bool(*success).u64(*match_index).u64(*conflict_index).u64(*conflict_term);
+            Body::AppendResp {
+                success,
+                match_index,
+                conflict_index,
+                conflict_term,
+            } => {
+                w.u8(6)
+                    .bool(*success)
+                    .u64(*match_index)
+                    .u64(*conflict_index)
+                    .u64(*conflict_term);
             }
             Body::SnapshotReq { snapshot } => {
                 w.u8(7);
@@ -127,16 +170,27 @@ impl Message {
         let mut r = Reader::new(buf);
         let term = r.u64()?;
         let body = match r.u8()? {
-            1 => Body::PreVoteReq { last_index: r.u64()?, last_term: r.u64()? },
+            1 => Body::PreVoteReq {
+                last_index: r.u64()?,
+                last_term: r.u64()?,
+            },
             2 => Body::PreVoteResp { granted: r.bool()? },
-            3 => Body::VoteReq { last_index: r.u64()?, last_term: r.u64()? },
+            3 => Body::VoteReq {
+                last_index: r.u64()?,
+                last_term: r.u64()?,
+            },
             4 => Body::VoteResp { granted: r.bool()? },
             5 => {
                 let prev_index = r.u64()?;
                 let prev_term = r.u64()?;
                 let commit = r.u64()?;
                 let entries = r.seq(Entry::decode)?;
-                Body::AppendReq { prev_index, prev_term, entries, commit }
+                Body::AppendReq {
+                    prev_index,
+                    prev_term,
+                    entries,
+                    commit,
+                }
             }
             6 => Body::AppendResp {
                 success: r.bool()?,
@@ -144,9 +198,17 @@ impl Message {
                 conflict_index: r.u64()?,
                 conflict_term: r.u64()?,
             },
-            7 => Body::SnapshotReq { snapshot: Snapshot::decode(&mut r)? },
-            8 => Body::SnapshotResp { success: r.bool()?, index: r.u64()? },
-            9 => Body::HeartbeatReq { commit: r.u64()?, ctx: r.u64()? },
+            7 => Body::SnapshotReq {
+                snapshot: Snapshot::decode(&mut r)?,
+            },
+            8 => Body::SnapshotResp {
+                success: r.bool()?,
+                index: r.u64()?,
+            },
+            9 => Body::HeartbeatReq {
+                commit: r.u64()?,
+                ctx: r.u64()?,
+            },
             10 => Body::HeartbeatResp { ctx: r.u64()? },
             11 => Body::TimeoutNow,
             t => return Err(DecodeError::BadTag(t)),
@@ -157,22 +219,38 @@ impl Message {
     /// A one-line summary for traces.
     pub fn summary(&self) -> String {
         match &self.body {
-            Body::PreVoteReq { last_index, last_term } => {
+            Body::PreVoteReq {
+                last_index,
+                last_term,
+            } => {
                 format!("PreVoteReq t{} log={last_term}.{last_index}", self.term)
             }
             Body::PreVoteResp { granted } => format!("PreVoteResp t{} {granted}", self.term),
-            Body::VoteReq { last_index, last_term } => {
+            Body::VoteReq {
+                last_index,
+                last_term,
+            } => {
                 format!("VoteReq t{} log={last_term}.{last_index}", self.term)
             }
             Body::VoteResp { granted } => format!("VoteResp t{} {granted}", self.term),
-            Body::AppendReq { prev_index, entries, commit, .. } => {
+            Body::AppendReq {
+                prev_index,
+                entries,
+                commit,
+                ..
+            } => {
                 format!(
                     "Append t{} prev={prev_index} n={} commit={commit}",
                     self.term,
                     entries.len()
                 )
             }
-            Body::AppendResp { success, match_index, conflict_index, .. } => {
+            Body::AppendResp {
+                success,
+                match_index,
+                conflict_index,
+                ..
+            } => {
                 if *success {
                     format!("AppendResp t{} ok match={match_index}", self.term)
                 } else {
@@ -236,7 +314,10 @@ pub fn unframe(buf: &[u8]) -> Result<&[u8]> {
     let payload = &buf[9..9 + len];
     let actual = crc32c(payload);
     if actual != crc {
-        return Err(DecodeError::BadChecksum { expected: crc, actual });
+        return Err(DecodeError::BadChecksum {
+            expected: crc,
+            actual,
+        });
     }
     Ok(payload)
 }
@@ -295,9 +376,21 @@ mod tests {
 
     fn sample_messages() -> Vec<Message> {
         vec![
-            Message::new(3, Body::PreVoteReq { last_index: 9, last_term: 2 }),
+            Message::new(
+                3,
+                Body::PreVoteReq {
+                    last_index: 9,
+                    last_term: 2,
+                },
+            ),
             Message::new(3, Body::PreVoteResp { granted: true }),
-            Message::new(4, Body::VoteReq { last_index: 9, last_term: 2 }),
+            Message::new(
+                4,
+                Body::VoteReq {
+                    last_index: 9,
+                    last_term: 2,
+                },
+            ),
             Message::new(4, Body::VoteResp { granted: false }),
             Message::new(
                 4,
@@ -306,8 +399,16 @@ mod tests {
                     prev_term: 2,
                     commit: 8,
                     entries: vec![
-                        Entry { term: 4, index: 10, kind: EntryKind::Noop },
-                        Entry { term: 4, index: 11, kind: EntryKind::Normal(b"x=1".to_vec()) },
+                        Entry {
+                            term: 4,
+                            index: 10,
+                            kind: EntryKind::Noop,
+                        },
+                        Entry {
+                            term: 4,
+                            index: 11,
+                            kind: EntryKind::Normal(b"x=1".to_vec()),
+                        },
                     ],
                 },
             ),
@@ -331,8 +432,20 @@ mod tests {
                     },
                 },
             ),
-            Message::new(5, Body::SnapshotResp { success: true, index: 50 }),
-            Message::new(5, Body::HeartbeatReq { commit: 49, ctx: 0xABCD }),
+            Message::new(
+                5,
+                Body::SnapshotResp {
+                    success: true,
+                    index: 50,
+                },
+            ),
+            Message::new(
+                5,
+                Body::HeartbeatReq {
+                    commit: 49,
+                    ctx: 0xABCD,
+                },
+            ),
             Message::new(5, Body::HeartbeatResp { ctx: 0xABCD }),
             Message::new(6, Body::TimeoutNow),
         ]
@@ -342,7 +455,12 @@ mod tests {
     fn every_message_round_trips() {
         for m in sample_messages() {
             let bytes = m.encode();
-            assert_eq!(Message::decode(&bytes).unwrap(), m, "failed on {}", m.summary());
+            assert_eq!(
+                Message::decode(&bytes).unwrap(),
+                m,
+                "failed on {}",
+                m.summary()
+            );
         }
     }
 
@@ -385,12 +503,19 @@ mod tests {
                 prev_index: 1,
                 prev_term: 1,
                 commit: 1,
-                entries: vec![Entry { term: 1, index: 2, kind: EntryKind::Normal(vec![7; 40]) }],
+                entries: vec![Entry {
+                    term: 1,
+                    index: 2,
+                    kind: EntryKind::Normal(vec![7; 40]),
+                }],
             },
         ))
         .encode();
         for n in 0..bytes.len() {
-            assert!(Wire::decode(&bytes[..n]).is_err(), "prefix of length {n} decoded");
+            assert!(
+                Wire::decode(&bytes[..n]).is_err(),
+                "prefix of length {n} decoded"
+            );
         }
         assert!(Wire::decode(&bytes).is_ok());
     }
@@ -417,8 +542,22 @@ mod tests {
 
     #[test]
     fn pre_vote_messages_are_flagged() {
-        assert!(Message::new(1, Body::PreVoteReq { last_index: 0, last_term: 0 }).is_pre_vote());
+        assert!(Message::new(
+            1,
+            Body::PreVoteReq {
+                last_index: 0,
+                last_term: 0
+            }
+        )
+        .is_pre_vote());
         assert!(Message::new(1, Body::PreVoteResp { granted: true }).is_pre_vote());
-        assert!(!Message::new(1, Body::VoteReq { last_index: 0, last_term: 0 }).is_pre_vote());
+        assert!(!Message::new(
+            1,
+            Body::VoteReq {
+                last_index: 0,
+                last_term: 0
+            }
+        )
+        .is_pre_vote());
     }
 }

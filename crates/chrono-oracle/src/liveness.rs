@@ -28,27 +28,53 @@ use crate::invariants::ClusterView;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Stall {
     /// No leader for too long after the environment became healthy.
-    NoLeader { healthy_for: Nanos, alive: usize, quorum: usize },
+    NoLeader {
+        healthy_for: Nanos,
+        alive: usize,
+        quorum: usize,
+    },
     /// A leader exists, but the commit index has not moved despite offered work.
-    NoCommitProgress { leader: NodeId, stuck_at: u64, healthy_for: Nanos },
+    NoCommitProgress {
+        leader: NodeId,
+        stuck_at: u64,
+        healthy_for: Nanos,
+    },
     /// A leader exists and commits, but replicas are not converging.
-    NoConvergence { leader: NodeId, laggard: NodeId, gap: u64, healthy_for: Nanos },
+    NoConvergence {
+        leader: NodeId,
+        laggard: NodeId,
+        gap: u64,
+        healthy_for: Nanos,
+    },
 }
 
 impl fmt::Display for Stall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Stall::NoLeader { healthy_for, alive, quorum } => write!(
+            Stall::NoLeader {
+                healthy_for,
+                alive,
+                quorum,
+            } => write!(
                 f,
                 "LIVENESS: no leader for {healthy_for} of healthy time with {alive} nodes alive \
                  (quorum is {quorum}) — the cluster is down without violating safety"
             ),
-            Stall::NoCommitProgress { leader, stuck_at, healthy_for } => write!(
+            Stall::NoCommitProgress {
+                leader,
+                stuck_at,
+                healthy_for,
+            } => write!(
                 f,
                 "LIVENESS: n{leader} has led for {healthy_for} with commit index stuck at \
                  {stuck_at} despite pending work"
             ),
-            Stall::NoConvergence { leader, laggard, gap, healthy_for } => write!(
+            Stall::NoConvergence {
+                leader,
+                laggard,
+                gap,
+                healthy_for,
+            } => write!(
                 f,
                 "LIVENESS: n{laggard} is {gap} entries behind leader n{leader} after \
                  {healthy_for} of healthy time — replication is not converging"
@@ -176,7 +202,11 @@ impl Watchdog {
             .collect();
         if leaders.is_empty() {
             if now.saturating_sub(self.saw_leader_at) > self.budget.elect_within {
-                self.record(Stall::NoLeader { healthy_for, alive, quorum });
+                self.record(Stall::NoLeader {
+                    healthy_for,
+                    alive,
+                    quorum,
+                });
             }
         } else {
             self.saw_leader_at = now;
@@ -213,8 +243,11 @@ impl Watchdog {
             }
         }
         if let Some((leader, _)) = leaders.first() {
-            let leader_last =
-                live.iter().find(|(id, _)| **id == *leader).map(|(_, s)| s.last_index).unwrap_or(0);
+            let leader_last = live
+                .iter()
+                .find(|(id, _)| **id == *leader)
+                .map(|(_, s)| s.last_index)
+                .unwrap_or(0);
             for (id, s) in &live {
                 if **id == *leader {
                     continue;
@@ -256,7 +289,9 @@ mod tests {
     use chronolog::node::PublicState;
 
     fn v(states: Vec<PublicState>) -> ClusterView {
-        ClusterView { nodes: states.into_iter().map(|s| (s.node, s)).collect() }
+        ClusterView {
+            nodes: states.into_iter().map(|s| (s.node, s)).collect(),
+        }
     }
 
     fn n(id: NodeId, role: &'static str, commit: u64, last: u64) -> PublicState {
@@ -277,7 +312,11 @@ mod tests {
             let now = Nanos::from_secs(i);
             w.observe(
                 now,
-                &v(vec![n(0, "leader", i, i), n(1, "follower", i, i), n(2, "follower", i, i)]),
+                &v(vec![
+                    n(0, "leader", i, i),
+                    n(1, "follower", i, i),
+                    n(2, "follower", i, i),
+                ]),
                 true,
                 true,
                 3,
@@ -292,7 +331,11 @@ mod tests {
         for i in 0..200u64 {
             w.observe(
                 Nanos::from_secs(i),
-                &v(vec![n(0, "follower", 5, 5), n(1, "follower", 5, 5), n(2, "candidate", 5, 5)]),
+                &v(vec![
+                    n(0, "follower", 5, 5),
+                    n(1, "follower", 5, 5),
+                    n(2, "candidate", 5, 5),
+                ]),
                 true,
                 true,
                 3,
@@ -317,7 +360,10 @@ mod tests {
                 3,
             );
         }
-        assert!(w.ok(), "a partitioned cluster must not be reported as stalled: {w}");
+        assert!(
+            w.ok(),
+            "a partitioned cluster must not be reported as stalled: {w}"
+        );
     }
 
     #[test]
@@ -349,7 +395,10 @@ mod tests {
             );
         }
         assert!(!w.ok());
-        assert!(matches!(w.stalls()[0], Stall::NoCommitProgress { .. }), "{w}");
+        assert!(
+            matches!(w.stalls()[0], Stall::NoCommitProgress { .. }),
+            "{w}"
+        );
     }
 
     #[test]
@@ -368,7 +417,10 @@ mod tests {
                 3,
             );
         }
-        assert!(w.ok(), "a follower that is behind but keeping up must not be flagged: {w}");
+        assert!(
+            w.ok(),
+            "a follower that is behind but keeping up must not be flagged: {w}"
+        );
     }
 
     #[test]
@@ -381,7 +433,11 @@ mod tests {
         for i in 0..600u64 {
             w.observe(
                 Nanos::from_secs(i),
-                &v(vec![n(0, "leader", i, i), n(1, "follower", i, i), dead.clone()]),
+                &v(vec![
+                    n(0, "leader", i, i),
+                    n(1, "follower", i, i),
+                    dead.clone(),
+                ]),
                 true,
                 true,
                 3,
@@ -403,7 +459,12 @@ mod tests {
             );
         }
         assert!(!w.ok());
-        assert!(w.stalls().iter().any(|s| matches!(s, Stall::NoConvergence { .. })), "{w}");
+        assert!(
+            w.stalls()
+                .iter()
+                .any(|s| matches!(s, Stall::NoConvergence { .. })),
+            "{w}"
+        );
     }
 
     #[test]
@@ -411,12 +472,30 @@ mod tests {
         let mut w = Watchdog::new(Budget::default());
         // Healthy but leaderless for a while — not yet over budget.
         for i in 0..20u64 {
-            w.observe(Nanos::from_secs(i), &v(vec![n(0, "follower", 1, 1)]), true, true, 3);
+            w.observe(
+                Nanos::from_secs(i),
+                &v(vec![n(0, "follower", 1, 1)]),
+                true,
+                true,
+                3,
+            );
         }
         // A disruption resets the clock.
-        w.observe(Nanos::from_secs(21), &v(vec![n(0, "follower", 1, 1)]), false, true, 3);
+        w.observe(
+            Nanos::from_secs(21),
+            &v(vec![n(0, "follower", 1, 1)]),
+            false,
+            true,
+            3,
+        );
         for i in 22..40u64 {
-            w.observe(Nanos::from_secs(i), &v(vec![n(0, "follower", 1, 1)]), true, true, 3);
+            w.observe(
+                Nanos::from_secs(i),
+                &v(vec![n(0, "follower", 1, 1)]),
+                true,
+                true,
+                3,
+            );
         }
         assert!(w.ok(), "the budget must restart after a disruption: {w}");
     }

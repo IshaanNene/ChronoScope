@@ -25,8 +25,8 @@
 //! rather than 1k.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono_sim::time::Nanos;
 use chrono_sim::traits::{Envelope, Host, NodeId};
@@ -69,6 +69,20 @@ impl Default for NodeOptions {
             inspect: false,
         }
     }
+}
+
+/// Client writes waiting on the log index they were proposed at.
+type PendingWrites = BTreeMap<Index, (NodeId, Request)>;
+/// Linearizable reads waiting on a `ReadIndex` confirmation context.
+type PendingReads = BTreeMap<u64, Vec<(NodeId, Request)>>;
+
+/// Everything `handle_client` needs to answer or park a request. Bundled
+/// because passing eight loose arguments through is how they get transposed.
+struct ClientCtx<'a> {
+    host: &'a Host,
+    handle: &'a NodeHandle,
+    writes: &'a mut PendingWrites,
+    reads: &'a mut PendingReads,
 }
 
 /// What the driver loop reacts to.
@@ -283,8 +297,8 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
     });
 
     // --- driver ----------------------------------------------------------
-    let mut pending_writes: BTreeMap<Index, (NodeId, Request)> = BTreeMap::new();
-    let mut pending_reads: BTreeMap<u64, Vec<(NodeId, Request)>> = BTreeMap::new();
+    let mut pending_writes: PendingWrites = BTreeMap::new();
+    let mut pending_reads: PendingReads = BTreeMap::new();
     let mut was_leader = false;
     let mut digest = ApplyDigest::new();
 
@@ -312,12 +326,14 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
                 Event::Client { from, req } => {
                     NodeMetrics::inc(&handle.metrics.client_requests);
                     handle_client(
-                        &host,
+                        &mut ClientCtx {
+                            host: &host,
+                            handle: &handle,
+                            writes: &mut pending_writes,
+                            reads: &mut pending_reads,
+                        },
                         &mut raft,
                         &mut kv,
-                        &handle,
-                        &mut pending_writes,
-                        &mut pending_reads,
                         from,
                         req,
                     );
@@ -339,11 +355,25 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
             // leaving it to time out — and it is honest: we genuinely do not
             // know whether those entries survived.
             for (_, (client, req)) in std::mem::take(&mut pending_writes) {
-                reply(&host, client, req, Outcome::NotLeader { hint: raft.leader() });
+                reply(
+                    &host,
+                    client,
+                    req,
+                    Outcome::NotLeader {
+                        hint: raft.leader(),
+                    },
+                );
             }
             for (_, waiting) in std::mem::take(&mut pending_reads) {
                 for (client, req) in waiting {
-                    reply(&host, client, req, Outcome::NotLeader { hint: raft.leader() });
+                    reply(
+                        &host,
+                        client,
+                        req,
+                        Outcome::NotLeader {
+                            hint: raft.leader(),
+                        },
+                    );
                 }
             }
         }
@@ -408,9 +438,7 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
             if !needy.is_empty() {
                 if let Some(snap) = raft.snapshot_at_applied(kv.snapshot()) {
                     for peer in needy {
-                        host.note(|| {
-                            format!("shipping snapshot @{} to n{peer}", snap.last_index)
-                        });
+                        host.note(|| format!("shipping snapshot @{} to n{peer}", snap.last_index));
                         raft.send_snapshot(peer, snap.clone());
                     }
                 }
@@ -456,9 +484,7 @@ async fn reconcile(
     if missing.is_empty() {
         return Ok(());
     }
-    host.note(|| {
-        format!("reconciling durable log: writing {}..={}", from, want_last)
-    });
+    host.note(|| format!("reconciling durable log: writing {}..={}", from, want_last));
     wal.append(&missing).await?;
     NodeMetrics::add(&handle.metrics.batched_entries, missing.len() as u64);
     NodeMetrics::inc(&handle.metrics.batches);
@@ -522,7 +548,7 @@ fn apply_committed(
     handle: &NodeHandle,
     kv: &mut KvStore,
     ready: &Ready,
-    pending_writes: &mut BTreeMap<Index, (NodeId, Request)>,
+    pending_writes: &mut PendingWrites,
     digest: &mut ApplyDigest,
 ) {
     for entry in &ready.committed {
@@ -551,12 +577,7 @@ fn apply_committed(
                     if original.client_id == req.client_id && original.seq == req.seq {
                         reply(host, client, original, outcome);
                     } else {
-                        reply(
-                            host,
-                            client,
-                            original,
-                            Outcome::NotLeader { hint: None },
-                        );
+                        reply(host, client, original, Outcome::NotLeader { hint: None });
                     }
                 }
             }
@@ -565,17 +586,19 @@ fn apply_committed(
 }
 
 fn handle_client(
-    host: &Host,
+    ctx: &mut ClientCtx<'_>,
     raft: &mut Raft,
     kv: &mut KvStore,
-    handle: &NodeHandle,
-    pending_writes: &mut BTreeMap<Index, (NodeId, Request)>,
-    pending_reads: &mut BTreeMap<u64, Vec<(NodeId, Request)>>,
     from: NodeId,
     req: Request,
 ) {
+    let (host, handle) = (ctx.host, ctx.handle);
     // A stale read is the only thing a non-leader will answer.
-    if let Op::Get { mode: ReadMode::Stale, .. } = &req.op {
+    if let Op::Get {
+        mode: ReadMode::Stale,
+        ..
+    } = &req.op
+    {
         NodeMetrics::inc(&handle.metrics.reads_stale);
         let outcome = serve_read(kv, &req);
         reply(host, from, req, outcome);
@@ -589,12 +612,22 @@ fn handle_client(
 
     if !raft.is_leader() {
         NodeMetrics::inc(&handle.metrics.not_leader_redirects);
-        reply(host, from, req, Outcome::NotLeader { hint: raft.leader() });
+        reply(
+            host,
+            from,
+            req,
+            Outcome::NotLeader {
+                hint: raft.leader(),
+            },
+        );
         return;
     }
 
     match &req.op {
-        Op::Get { mode: ReadMode::Lease, .. } if raft.lease_valid() => {
+        Op::Get {
+            mode: ReadMode::Lease,
+            ..
+        } if raft.lease_valid() => {
             NodeMetrics::inc(&handle.metrics.reads_lease);
             let outcome = serve_read(kv, &req);
             reply(host, from, req, outcome);
@@ -602,7 +635,7 @@ fn handle_client(
         Op::Get { .. } => {
             NodeMetrics::inc(&handle.metrics.reads_linearizable);
             match raft.read_index() {
-                Some(ctx) => pending_reads.entry(ctx).or_default().push((from, req)),
+                Some(rctx) => ctx.reads.entry(rctx).or_default().push((from, req)),
                 // A leader that has not yet committed in its own term cannot
                 // bound a read. Telling the client to retry is the honest
                 // answer; serving from local state would not be linearizable.
@@ -614,9 +647,16 @@ fn handle_client(
             match raft.propose(data) {
                 Some(index) => {
                     NodeMetrics::inc(&handle.metrics.proposals);
-                    pending_writes.insert(index, (from, req));
+                    ctx.writes.insert(index, (from, req));
                 }
-                None => reply(host, from, req, Outcome::NotLeader { hint: raft.leader() }),
+                None => reply(
+                    host,
+                    from,
+                    req,
+                    Outcome::NotLeader {
+                        hint: raft.leader(),
+                    },
+                ),
             }
         }
     }
@@ -631,14 +671,24 @@ fn serve_read(kv: &KvStore, req: &Request) -> Outcome {
 }
 
 fn reply(host: &Host, to: NodeId, req: Request, outcome: Outcome) {
-    let resp = Response { client_id: req.client_id, seq: req.seq, outcome };
+    let resp = Response {
+        client_id: req.client_id,
+        seq: req.seq,
+        outcome,
+    };
     host.net.send(to, Wire::Reply(resp).encode());
 }
 
 fn decode(env: &Envelope) -> Option<Event> {
     match Wire::decode(&env.payload).ok()? {
-        Wire::Raft(msg) => Some(Event::Wire { from: env.from, msg }),
-        Wire::Client(req) => Some(Event::Client { from: env.from, req }),
+        Wire::Raft(msg) => Some(Event::Wire {
+            from: env.from,
+            msg,
+        }),
+        Wire::Client(req) => Some(Event::Client {
+            from: env.from,
+            req,
+        }),
         // A node does not act on replies; only clients do.
         Wire::Reply(_) => None,
     }
@@ -736,7 +786,11 @@ fn publish(
 /// Propose a membership change on whichever node is the leader. Exposed for
 /// the CLI and tests; the driver picks it up like any other proposal.
 pub fn encode_config_change(change: &ConfigChange) -> Entry {
-    Entry { term: 0, index: 0, kind: EntryKind::Config(change.clone()) }
+    Entry {
+        term: 0,
+        index: 0,
+        kind: EntryKind::Config(change.clone()),
+    }
 }
 
 /// Build the snapshot a node would take right now. Exposed for tests.

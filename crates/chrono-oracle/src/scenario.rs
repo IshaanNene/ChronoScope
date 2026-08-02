@@ -35,6 +35,11 @@ use crate::invariants::{ClusterView, Invariants};
 use crate::linearizability::{self, Limits, Verdict};
 use crate::liveness::{Budget, Watchdog};
 
+/// Node handles keyed by id, each with the boot generation the observer has
+/// counted for it. See `PublicState::generation` for why the generation is
+/// tracked out here rather than by the node.
+type Handles = Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>;
+
 #[derive(Clone, Debug)]
 pub struct ScenarioConfig {
     pub seed: u64,
@@ -200,7 +205,7 @@ pub fn run_with_probe(
     config: &ScenarioConfig,
     mut probe: impl FnMut(Nanos, &ClusterView),
 ) -> RunReport {
-    let started = std::time::Instant::now();
+    let started = std::time::Instant::now(); // ci-allow: harness timing its own run
     let sim = Sim::new(config.seed, config.policy.clone(), config.trace);
     sim.set_notes(!matches!(config.trace, TraceMode::HashOnly));
 
@@ -213,7 +218,10 @@ pub fn run_with_probe(
             lease_reads: config.lease_reads,
             ..RaftOptions::default()
         },
-        wal: WalOptions { segment_bytes: 64 * 1024, compact_slack_bytes: 16 * 1024 },
+        wal: WalOptions {
+            segment_bytes: 64 * 1024,
+            compact_slack_bytes: 16 * 1024,
+        },
         tick_interval: Nanos::from_millis(20),
         bootstrap,
         inspect: true,
@@ -223,8 +231,7 @@ pub fn run_with_probe(
     // is why this is a shared map rather than a vector built once.
     // Keyed with a generation counter, bumped on every boot, so oracles can
     // tell a restart from a regression.
-    let handles: Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>> =
-        Arc::new(Mutex::new(BTreeMap::new()));
+    let handles: Handles = Arc::new(Mutex::new(BTreeMap::new()));
     let hs = Arc::clone(&handles);
     let servers = config.servers;
     sim.set_boot(move |host: Host| {
@@ -276,14 +283,23 @@ pub fn run_with_probe(
                 let is_read = (h.rng.next_u64() % 100) < cfg.read_percent as u64;
                 let (op, hop) = if is_read {
                     (
-                        Op::Get { key: key.clone(), mode: cfg.read_mode },
+                        Op::Get {
+                            key: key.clone(),
+                            mode: cfg.read_mode,
+                        },
                         HOp::Read { key: key.clone() },
                     )
                 } else {
                     let value = format!("c{client_id}-{i}").into_bytes();
                     (
-                        Op::Put { key: key.clone(), value: value.clone() },
-                        HOp::Write { key: key.clone(), value },
+                        Op::Put {
+                            key: key.clone(),
+                            value: value.clone(),
+                        },
+                        HOp::Write {
+                            key: key.clone(),
+                            value,
+                        },
                     )
                 };
 
@@ -382,13 +398,9 @@ pub fn run_with_probe(
     let ops_ok = history.len() as u64 - ops_unknown;
     let verdict = linearizability::check(&history, config.limits);
 
-    let trace: Vec<chrono_sim::trace::Entry> =
-        sim.with_trace(|r| r.entries().cloned().collect());
+    let trace: Vec<chrono_sim::trace::Entry> = sim.with_trace(|r| r.entries().cloned().collect());
 
-    let ok = !outcome.is_failure()
-        && invariants.ok()
-        && watchdog.ok()
-        && !verdict.is_violation();
+    let ok = !outcome.is_failure() && invariants.ok() && watchdog.ok() && !verdict.is_violation();
 
     RunReport {
         seed: config.seed,
@@ -408,7 +420,7 @@ pub fn run_with_probe(
     }
 }
 
-fn collect(handles: &Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>) -> ClusterView {
+fn collect(handles: &Handles) -> ClusterView {
     let handles = handles.lock().unwrap();
     let mut nodes = BTreeMap::new();
     for (id, (generation, h)) in handles.iter() {
@@ -419,10 +431,7 @@ fn collect(handles: &Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>) -> Cluster
     ClusterView { nodes }
 }
 
-fn collect_live(
-    handles: &Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>,
-    sim: &Sim,
-) -> ClusterView {
+fn collect_live(handles: &Handles, sim: &Sim) -> ClusterView {
     let mut view = collect(handles);
     for (id, state) in view.nodes.iter_mut() {
         state.up = sim.is_up(*id);
@@ -488,8 +497,8 @@ impl std::fmt::Display for DeterminismReport {
                  run A: hash {:016x}  events {}  ops {}  time {}\n  \
                  run B: hash {:016x}  events {}  ops {}  time {}\n\n  \
                  Something read entropy the kernel did not provide. Usual suspects:\n    \
-                 - HashMap/HashSet iteration order (use BTreeMap/BTreeSet)\n    \
-                 - SystemTime::now() or Instant::now() outside the `real` runtime\n    \
+                 - hash-map or hash-set iteration order (use the BTree equivalents)\n    \
+                 - a real system clock read outside the `real` runtime\n    \
                  - ordering derived from a pointer or address\n    \
                  - a thread, or a f64 whose libm differs across targets",
                 self.seed,

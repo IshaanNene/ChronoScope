@@ -1,0 +1,6 @@
+apiVersion: v2
+name: chronolog
+description: A Raft-replicated, crash-consistent write-ahead log
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

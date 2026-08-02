@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono_sim::fault::{DiskPolicy, FaultPolicy};
 use chrono_sim::prelude::*;
-use chronolog::types::{Entry, EntryKind, HardState, Snapshot, Config};
+use chronolog::types::{Config, Entry, EntryKind, HardState, Snapshot};
 use chronolog::wal::{TailReason, Wal, WalOptions};
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,10 @@ where
 }
 
 fn sim_with(seed: u64, disk: DiskPolicy) -> (Sim, Host) {
-    let policy = FaultPolicy { disk, ..FaultPolicy::benign() };
+    let policy = FaultPolicy {
+        disk,
+        ..FaultPolicy::benign()
+    };
     let sim = Sim::new(seed, policy, TraceMode::HashOnly);
     sim.set_boot(|_| {});
     let host = sim.add_node(0, Role::Server);
@@ -55,11 +58,20 @@ fn sim_with(seed: u64, disk: DiskPolicy) -> (Sim, Host) {
 }
 
 fn quiet_disk() -> DiskPolicy {
-    DiskPolicy { torn_write_ppm: 0, lost_write_ppm: 0, slow_ppm: 0, ..DiskPolicy::default() }
+    DiskPolicy {
+        torn_write_ppm: 0,
+        lost_write_ppm: 0,
+        slow_ppm: 0,
+        ..DiskPolicy::default()
+    }
 }
 
 fn cmd(term: u64, index: u64) -> Entry {
-    Entry { term, index, kind: EntryKind::Normal(format!("set k{index}=v{index}").into_bytes()) }
+    Entry {
+        term,
+        index,
+        kind: EntryKind::Normal(format!("set k{index}=v{index}").into_bytes()),
+    }
 }
 
 /// Assert the recovered log is a prefix of what was written, with no holes.
@@ -71,11 +83,19 @@ fn assert_is_prefix(recovered: &[Entry], written: &[Entry]) {
         written.len()
     );
     for (i, (got, want)) in recovered.iter().zip(written.iter()).enumerate() {
-        assert_eq!(got, want, "entry {i} differs: the log is not a prefix of what was written");
+        assert_eq!(
+            got, want,
+            "entry {i} differs: the log is not a prefix of what was written"
+        );
     }
     // Contiguity, restated directly rather than inferred from the above.
     for w in recovered.windows(2) {
-        assert_eq!(w[1].index, w[0].index + 1, "hole in the recovered log at {:?}", w[0].index);
+        assert_eq!(
+            w[1].index,
+            w[0].index + 1,
+            "hole in the recovered log at {:?}",
+            w[0].index
+        );
     }
 }
 
@@ -103,7 +123,11 @@ fn a_synced_log_recovers_completely() {
         (r.entries, r.tail, r.truncated)
     });
 
-    assert_eq!(rec.1, TailReason::Clean, "a fully synced log must recover cleanly");
+    assert_eq!(
+        rec.1,
+        TailReason::Clean,
+        "a fully synced log must recover cleanly"
+    );
     assert_eq!(rec.2, 0);
     assert_eq!(rec.0, written);
 }
@@ -113,21 +137,40 @@ fn hard_state_survives_a_restart() {
     let (sim, host) = sim_with(2, quiet_disk());
     block_on(&sim, &host, |h| async move {
         let mut wal = Wal::open(h, WalOptions::default()).await.unwrap().wal;
-        wal.save_hard_state(HardState { term: 7, vote: Some(3), commit: 41 }).await.unwrap();
+        wal.save_hard_state(HardState {
+            term: 7,
+            vote: Some(3),
+            commit: 41,
+        })
+        .await
+        .unwrap();
     });
     sim.crash(0);
     sim.restart(0);
     let host = sim.host(0);
     let hs = block_on(&sim, &host, |h| async move {
-        Wal::open(h, WalOptions::default()).await.unwrap().hard_state
+        Wal::open(h, WalOptions::default())
+            .await
+            .unwrap()
+            .hard_state
     });
-    assert_eq!(hs, HardState { term: 7, vote: Some(3), commit: 41 });
+    assert_eq!(
+        hs,
+        HardState {
+            term: 7,
+            vote: Some(3),
+            commit: 41
+        }
+    );
 }
 
 #[test]
 fn segments_roll_over_and_recover_across_the_boundary() {
     // Small segments so 500 entries span many files.
-    let opts = WalOptions { segment_bytes: 2048, compact_slack_bytes: 0 };
+    let opts = WalOptions {
+        segment_bytes: 2048,
+        compact_slack_bytes: 0,
+    };
     let (sim, host) = sim_with(3, quiet_disk());
     let written: Vec<Entry> = (1..=500).map(|i| cmd(2, i)).collect();
 
@@ -138,7 +181,10 @@ fn segments_roll_over_and_recover_across_the_boundary() {
         wal.sync().await.unwrap();
         wal.segment_count()
     });
-    assert!(segs > 5, "500 entries in 2 KiB segments should roll over repeatedly, got {segs}");
+    assert!(
+        segs > 5,
+        "500 entries in 2 KiB segments should roll over repeatedly, got {segs}"
+    );
 
     sim.crash(0);
     sim.restart(0);
@@ -149,7 +195,10 @@ fn segments_roll_over_and_recover_across_the_boundary() {
         (r.entries, r.tail)
     });
     assert_eq!(rec.1, TailReason::Clean);
-    assert_eq!(rec.0, written, "entries must recover across segment boundaries");
+    assert_eq!(
+        rec.0, written,
+        "entries must recover across segment boundaries"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -217,11 +266,16 @@ fn a_torn_record_is_detected_by_its_checksum_and_truncated() {
 
         let w = written.clone();
         block_on(&sim, &host, move |h| async move {
-            let mut wal =
-                Wal::open(h, WalOptions { segment_bytes: 1 << 30, compact_slack_bytes: 0 })
-                    .await
-                    .unwrap()
-                    .wal;
+            let mut wal = Wal::open(
+                h,
+                WalOptions {
+                    segment_bytes: 1 << 30,
+                    compact_slack_bytes: 0,
+                },
+            )
+            .await
+            .unwrap()
+            .wal;
             wal.append(&w[..5]).await.unwrap();
             wal.sync().await.unwrap();
             wal.append(&w[5..]).await.unwrap();
@@ -235,19 +289,31 @@ fn a_torn_record_is_detected_by_its_checksum_and_truncated() {
         sim.restart(0);
         let host = sim.host(0);
         let rec = block_on(&sim, &host, |h| async move {
-            let r = Wal::open(h, WalOptions { segment_bytes: 1 << 30, compact_slack_bytes: 0 })
-                .await
-                .unwrap();
+            let r = Wal::open(
+                h,
+                WalOptions {
+                    segment_bytes: 1 << 30,
+                    compact_slack_bytes: 0,
+                },
+            )
+            .await
+            .unwrap();
             (r.entries, r.tail)
         });
 
         assert_is_prefix(&rec.0, &written);
-        assert!(rec.0.len() >= 5, "the fsynced prefix must survive a torn tail");
+        assert!(
+            rec.0.len() >= 5,
+            "the fsynced prefix must survive a torn tail"
+        );
         if matches!(rec.1, TailReason::BadChecksum | TailReason::ShortBody) {
             saw_a_checksum_failure = true;
         }
     }
-    assert!(saw_a_tear, "40 seeds at a 100% tear rate produced no torn write");
+    assert!(
+        saw_a_tear,
+        "40 seeds at a 100% tear rate produced no torn write"
+    );
     assert!(
         saw_a_checksum_failure,
         "no seed produced a half-written record; the checksum path is untested"
@@ -269,7 +335,11 @@ fn corruption_in_the_middle_truncates_rather_than_skipping_the_bad_record() {
     // Flip a bit deep inside the segment, simulating bit rot on the platter.
     block_on(&sim, &host, |h| async move {
         let names = h.storage.list().await.unwrap();
-        let seg = names.iter().find(|n| n.starts_with("wal-")).unwrap().clone();
+        let seg = names
+            .iter()
+            .find(|n| n.starts_with("wal-"))
+            .unwrap()
+            .clone();
         let f = h.storage.open(&seg).await.unwrap();
         let byte = f.read_at(600, 1).await.unwrap();
         f.write_at(600, vec![byte[0] ^ 0x40]).await.unwrap();
@@ -284,12 +354,19 @@ fn corruption_in_the_middle_truncates_rather_than_skipping_the_bad_record() {
         (r.entries, r.tail)
     });
 
-    assert_eq!(rec.1, TailReason::BadChecksum, "the CRC must catch a flipped bit");
+    assert_eq!(
+        rec.1,
+        TailReason::BadChecksum,
+        "the CRC must catch a flipped bit"
+    );
     // The crucial part: recovery stops *at* the bad record. It does not hunt
     // forward for the next one that happens to checksum, because that would
     // leave a hole and every safety property downstream assumes contiguity.
     assert_is_prefix(&rec.0, &written);
-    assert!(rec.0.len() < 50, "recovery must stop at the corruption, not read past it");
+    assert!(
+        rec.0.len() < 50,
+        "recovery must stop at the corruption, not read past it"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +375,10 @@ fn corruption_in_the_middle_truncates_rather_than_skipping_the_bad_record() {
 
 #[test]
 fn truncate_from_drops_exactly_the_conflicting_suffix() {
-    let opts = WalOptions { segment_bytes: 1024, compact_slack_bytes: 0 };
+    let opts = WalOptions {
+        segment_bytes: 1024,
+        compact_slack_bytes: 0,
+    };
     let (sim, host) = sim_with(7, quiet_disk());
     let written: Vec<Entry> = (1..=200).map(|i| cmd(1, i)).collect();
 
@@ -326,8 +406,16 @@ fn truncate_from_drops_exactly_the_conflicting_suffix() {
     });
 
     assert_eq!(rec.len(), 140);
-    assert_eq!(rec[118], cmd(1, 119), "entries before the cut keep their original term");
-    assert_eq!(rec[119], cmd(9, 120), "entries after the cut are the replacements");
+    assert_eq!(
+        rec[118],
+        cmd(1, 119),
+        "entries before the cut keep their original term"
+    );
+    assert_eq!(
+        rec[119],
+        cmd(9, 120),
+        "entries after the cut are the replacements"
+    );
     assert_eq!(rec[139], cmd(9, 140));
     for w in rec.windows(2) {
         assert_eq!(w[1].index, w[0].index + 1);
@@ -336,7 +424,10 @@ fn truncate_from_drops_exactly_the_conflicting_suffix() {
 
 #[test]
 fn compaction_deletes_superseded_segments_and_recovery_starts_from_the_snapshot() {
-    let opts = WalOptions { segment_bytes: 1024, compact_slack_bytes: 0 };
+    let opts = WalOptions {
+        segment_bytes: 1024,
+        compact_slack_bytes: 0,
+    };
     let (sim, host) = sim_with(8, quiet_disk());
     let written: Vec<Entry> = (1..=400).map(|i| cmd(1, i)).collect();
 
@@ -357,7 +448,10 @@ fn compaction_deletes_superseded_segments_and_recovery_starts_from_the_snapshot(
         wal.compact_through(300).await.unwrap();
         (before, wal.segment_count())
     });
-    assert!(after < before, "compaction should free segments: {before} -> {after}");
+    assert!(
+        after < before,
+        "compaction should free segments: {before} -> {after}"
+    );
 
     sim.crash(0);
     sim.restart(0);
@@ -376,7 +470,11 @@ fn compaction_deletes_superseded_segments_and_recovery_starts_from_the_snapshot(
         rec.0.first().map(|e| e.index).unwrap_or(301) > 300,
         "entries covered by the snapshot must not be replayed"
     );
-    assert_eq!(rec.0.last().unwrap().index, 400, "entries past the snapshot must survive");
+    assert_eq!(
+        rec.0.last().unwrap().index,
+        400,
+        "entries past the snapshot must survive"
+    );
 }
 
 #[test]
@@ -438,7 +536,10 @@ fn a_torn_snapshot_falls_back_to_the_previous_slot() {
             checked += 1;
         }
     }
-    assert!(checked > 0, "30 seeds never exercised the fallback to the previous slot");
+    assert!(
+        checked > 0,
+        "30 seeds never exercised the fallback to the previous slot"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -466,8 +567,14 @@ fn randomised_crashes_never_lose_acknowledged_data_and_never_leave_a_hole() {
 
         let (w, a) = (written.clone(), Arc::clone(&acked));
         host.spawn_with("writer", |h| async move {
-            let Ok(r) = Wal::open(h, WalOptions { segment_bytes: 4096, compact_slack_bytes: 0 })
-                .await
+            let Ok(r) = Wal::open(
+                h,
+                WalOptions {
+                    segment_bytes: 4096,
+                    compact_slack_bytes: 0,
+                },
+            )
+            .await
             else {
                 return;
             };
@@ -497,10 +604,16 @@ fn randomised_crashes_never_lose_acknowledged_data_and_never_leave_a_hole() {
         sim.restart(0);
         let host = sim.host(0);
         let rec = block_on(&sim, &host, |h| async move {
-            Wal::open(h, WalOptions { segment_bytes: 4096, compact_slack_bytes: 0 })
-                .await
-                .unwrap()
-                .entries
+            Wal::open(
+                h,
+                WalOptions {
+                    segment_bytes: 4096,
+                    compact_slack_bytes: 0,
+                },
+            )
+            .await
+            .unwrap()
+            .entries
         });
 
         assert_is_prefix(&rec, &written);

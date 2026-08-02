@@ -81,7 +81,12 @@ impl fmt::Display for Nanos {
             return write!(f, "{}.{:03}us", n / 1_000, n % 1_000);
         }
         if n < NANOS_PER_SEC {
-            return write!(f, "{}.{:03}ms", n / NANOS_PER_MILLI, (n % NANOS_PER_MILLI) / 1_000);
+            return write!(
+                f,
+                "{}.{:03}ms",
+                n / NANOS_PER_MILLI,
+                (n % NANOS_PER_MILLI) / 1_000
+            );
         }
         let secs = n / NANOS_PER_SEC;
         let frac = (n % NANOS_PER_SEC) / NANOS_PER_MILLI;

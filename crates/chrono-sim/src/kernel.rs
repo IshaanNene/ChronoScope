@@ -29,8 +29,8 @@
 //! from this and the simulator hangs in a way that looks like a bug in the
 //! system under test.
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -67,19 +67,30 @@ pub(crate) struct TimerSlot {
 
 impl TimerSlot {
     fn new() -> Arc<Mutex<TimerSlot>> {
-        Arc::new(Mutex::new(TimerSlot { fired: false, waker: None }))
+        Arc::new(Mutex::new(TimerSlot {
+            fired: false,
+            waker: None,
+        }))
     }
 }
 
 enum Action {
     /// A sleep or an I/O completion.
     Fire(Arc<Mutex<TimerSlot>>),
-    Deliver { from: NodeId, to: NodeId, msg: u64, payload: Vec<u8> },
+    Deliver {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+        payload: Vec<u8>,
+    },
     ChaosTick,
     Restart(NodeId),
     Heal(Vec<(NodeId, NodeId)>),
     Resume(NodeId),
 }
+
+/// The scheduler's event heap: a min-heap over `(virtual_time, sequence)`.
+type TimerHeap = BinaryHeap<Reverse<Timer>>;
 
 struct Timer {
     at: Nanos,
@@ -135,7 +146,12 @@ impl FileState {
     fn new(name: &str) -> Self {
         let mut h = Fnv::new();
         h.bytes(name.as_bytes());
-        Self { id: h.get(), durable: Vec::new(), view: Vec::new(), pending: Vec::new() }
+        Self {
+            id: h.get(),
+            durable: Vec::new(),
+            view: Vec::new(),
+            pending: Vec::new(),
+        }
     }
 }
 
@@ -229,7 +245,7 @@ impl Outcome {
 struct Inner {
     now: Nanos,
     seq: u64,
-    timers: BinaryHeap<Reverse<Timer>>,
+    timers: TimerHeap,
     tasks: BTreeMap<TaskId, TaskSlot>,
     ready: BTreeSet<TaskId>,
     next_task: TaskId,
@@ -269,9 +285,14 @@ impl std::fmt::Debug for Kernel {
     }
 }
 
+/// A node's entry point, re-invoked on every restart with a fresh `Host` for
+/// the same node id — exactly like a process restarting on the same machine,
+/// with the same disk.
+type BootFn = Arc<dyn Fn(Host) + Send + Sync>;
+
 pub struct Kernel {
     inner: Mutex<Inner>,
-    boot: Mutex<Option<Arc<dyn Fn(Host) + Send + Sync>>>,
+    boot: Mutex<Option<BootFn>>,
     /// Set when a task panics, so the loop can stop and report.
     panic_msg: Mutex<Option<(NodeId, String)>>,
 }
@@ -327,7 +348,7 @@ impl Kernel {
         let inner = Inner {
             now: Nanos::ZERO,
             seq: 0,
-            timers: BinaryHeap::new(),
+            timers: TimerHeap::new(),
             tasks: BTreeMap::new(),
             ready: BTreeSet::new(),
             next_task: 1,
@@ -420,7 +441,10 @@ unsafe fn vt_drop(p: *const ()) {
 }
 
 fn make_waker(id: TaskId, kernel: &Arc<Kernel>) -> Waker {
-    let handle = Arc::new(TaskWake { id, kernel: Arc::downgrade(kernel) });
+    let handle = Arc::new(TaskWake {
+        id,
+        kernel: Arc::downgrade(kernel),
+    });
     // SAFETY: `handle` is a freshly created `Arc<TaskWake>` and `into_raw`
     // transfers exactly one reference to the waker, which is what `VTABLE`'s
     // accounting assumes. The pointer is only ever read back as
@@ -520,17 +544,28 @@ fn apply_drift(t: Nanos, ppm: i64) -> Nanos {
 
 impl Clock for SimClock {
     fn now(&self) -> Nanos {
-        let Some(k) = self.kernel.upgrade() else { return Nanos::ZERO };
+        let Some(k) = self.kernel.upgrade() else {
+            return Nanos::ZERO;
+        };
         let inner = k.lock();
-        let (skew, ppm) =
-            inner.nodes.get(&self.node).map(|n| (n.skew, n.drift_ppm)).unwrap_or((0, 0));
+        let (skew, ppm) = inner
+            .nodes
+            .get(&self.node)
+            .map(|n| (n.skew, n.drift_ppm))
+            .unwrap_or((0, 0));
         apply_drift(inner.now, ppm).offset(skew)
     }
 
     fn monotonic(&self) -> Nanos {
-        let Some(k) = self.kernel.upgrade() else { return Nanos::ZERO };
+        let Some(k) = self.kernel.upgrade() else {
+            return Nanos::ZERO;
+        };
         let inner = k.lock();
-        let ppm = inner.nodes.get(&self.node).map(|n| n.drift_ppm).unwrap_or(0);
+        let ppm = inner
+            .nodes
+            .get(&self.node)
+            .map(|n| n.drift_ppm)
+            .unwrap_or(0);
         apply_drift(inner.now, ppm)
     }
 
@@ -541,7 +576,11 @@ impl Clock for SimClock {
         let slot = TimerSlot::new();
         {
             let mut inner = k.lock();
-            let ppm = inner.nodes.get(&self.node).map(|n| n.drift_ppm).unwrap_or(0);
+            let ppm = inner
+                .nodes
+                .get(&self.node)
+                .map(|n| n.drift_ppm)
+                .unwrap_or(0);
             // The sleeper measures duration on its *own* clock. A node running
             // 3000ppm fast wakes 0.3% early in true time — which is precisely
             // how a follower's election timer fires before the leader's
@@ -554,7 +593,11 @@ impl Clock for SimClock {
             };
             let task = inner.current.unwrap_or(0);
             let until = inner.now.saturating_add(Nanos(true_dur));
-            inner.record(Event::Sleep { node: self.node, task, until });
+            inner.record(Event::Sleep {
+                node: self.node,
+                task,
+                until,
+            });
             inner.schedule(Nanos(true_dur), Action::Fire(Arc::clone(&slot)));
         }
         Box::pin(TimerFuture { slot })
@@ -568,7 +611,9 @@ struct SimNet {
 
 impl Network for SimNet {
     fn send(&self, to: NodeId, payload: Vec<u8>) {
-        let Some(k) = self.kernel.upgrade() else { return };
+        let Some(k) = self.kernel.upgrade() else {
+            return;
+        };
         let mut inner = k.lock();
         let from = self.node;
         let msg = inner.next_msg;
@@ -579,7 +624,12 @@ impl Network for SimNet {
 
         if !inner.nodes.contains_key(&to) {
             inner.stats.msgs_dropped += 1;
-            inner.record(Event::Dropped { from, to, msg, why: DropReason::NodeGone });
+            inner.record(Event::Dropped {
+                from,
+                to,
+                msg,
+                why: DropReason::NodeGone,
+            });
             return;
         }
         // Partition is evaluated when the packet enters the link, not when it
@@ -588,19 +638,37 @@ impl Network for SimNet {
         // is where the interesting reorderings live.
         if inner.is_blocked(from, to) {
             inner.stats.msgs_dropped += 1;
-            inner.record(Event::Dropped { from, to, msg, why: DropReason::Partitioned });
+            inner.record(Event::Dropped {
+                from,
+                to,
+                msg,
+                why: DropReason::Partitioned,
+            });
             return;
         }
         let loss = inner.policy.link.loss_ppm;
         if inner.rng.ppm(loss) {
             inner.stats.msgs_dropped += 1;
-            inner.record(Event::Dropped { from, to, msg, why: DropReason::RandomLoss });
+            inner.record(Event::Dropped {
+                from,
+                to,
+                msg,
+                why: DropReason::RandomLoss,
+            });
             return;
         }
 
         let deliver = |inner: &mut Inner, payload: Vec<u8>| {
             let d = inner.policy.link.latency.sample(&inner.rng);
-            inner.schedule(Nanos(d), Action::Deliver { from, to, msg, payload });
+            inner.schedule(
+                Nanos(d),
+                Action::Deliver {
+                    from,
+                    to,
+                    msg,
+                    payload,
+                },
+            );
         };
 
         let mut payload = payload;
@@ -609,7 +677,12 @@ impl Network for SimNet {
             let idx = inner.rng.below(payload.len() as u64) as usize;
             let bit = inner.rng.below(8) as u32;
             payload[idx] ^= 1 << bit;
-            inner.record(Event::Corrupted { from, to, msg, byte: idx });
+            inner.record(Event::Corrupted {
+                from,
+                to,
+                msg,
+                byte: idx,
+            });
         }
 
         let dup = inner.policy.link.duplicate_ppm;
@@ -623,7 +696,10 @@ impl Network for SimNet {
     }
 
     fn recv(&self) -> BoxFuture<'static, Option<Envelope>> {
-        Box::pin(RecvFuture { kernel: Weak::clone(&self.kernel), node: self.node })
+        Box::pin(RecvFuture {
+            kernel: Weak::clone(&self.kernel),
+            node: self.node,
+        })
     }
 
     fn local(&self) -> NodeId {
@@ -651,7 +727,9 @@ impl Storage for SimStorage {
                 let Some(n) = inner.nodes.get_mut(&node) else {
                     return Err(crate::traits::eio("no such node"));
                 };
-                n.files.entry(name.clone()).or_insert_with(|| FileState::new(&name));
+                n.files
+                    .entry(name.clone())
+                    .or_insert_with(|| FileState::new(&name));
             }
             let f: Arc<dyn File> = Arc::new(SimFile { kernel, node, name });
             Ok(f)
@@ -662,7 +740,9 @@ impl Storage for SimStorage {
         let kernel = Weak::clone(&self.kernel);
         let node = self.node;
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Ok(Vec::new()) };
+            let Some(k) = kernel.upgrade() else {
+                return Ok(Vec::new());
+            };
             let inner = k.lock();
             Ok(inner
                 .nodes
@@ -677,7 +757,9 @@ impl Storage for SimStorage {
         let node = self.node;
         let name = name.to_string();
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Ok(()) };
+            let Some(k) = kernel.upgrade() else {
+                return Ok(());
+            };
             let mut inner = k.lock();
             if let Some(n) = inner.nodes.get_mut(&node) {
                 n.files.remove(&name);
@@ -690,7 +772,9 @@ impl Storage for SimStorage {
         let kernel = Weak::clone(&self.kernel);
         let node = self.node;
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Ok(()) };
+            let Some(k) = kernel.upgrade() else {
+                return Ok(());
+            };
             let slot = TimerSlot::new();
             {
                 let mut inner = k.lock();
@@ -732,7 +816,9 @@ impl SimFile {
 
 impl File for SimFile {
     fn len(&self) -> u64 {
-        let Some(k) = self.kernel.upgrade() else { return 0 };
+        let Some(k) = self.kernel.upgrade() else {
+            return 0;
+        };
         let inner = k.lock();
         inner
             .nodes
@@ -747,7 +833,9 @@ impl File for SimFile {
         let node = self.node;
         let name = self.name.clone();
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Err(crate::traits::eio("kernel gone")) };
+            let Some(k) = kernel.upgrade() else {
+                return Err(crate::traits::eio("kernel gone"));
+            };
             let slot = TimerSlot::new();
             {
                 let mut inner = k.lock();
@@ -779,7 +867,12 @@ impl File for SimFile {
                 f.pending.push(PendingOp::Write { offset, data });
                 inner.stats.disk_writes += 1;
                 inner.stats.disk_bytes += len as u64;
-                inner.record(Event::DiskWrite { node, file: fid, offset, len });
+                inner.record(Event::DiskWrite {
+                    node,
+                    file: fid,
+                    offset,
+                    len,
+                });
                 let d = SimFile::latency(&mut inner, 0);
                 inner.schedule(d, Action::Fire(Arc::clone(&slot)));
             }
@@ -793,7 +886,9 @@ impl File for SimFile {
         let node = self.node;
         let name = self.name.clone();
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Err(crate::traits::eio("kernel gone")) };
+            let Some(k) = kernel.upgrade() else {
+                return Err(crate::traits::eio("kernel gone"));
+            };
             let slot = TimerSlot::new();
             {
                 let mut inner = k.lock();
@@ -803,7 +898,12 @@ impl File for SimFile {
                     .and_then(|n| n.files.get(&name))
                     .map(|f| f.id)
                     .unwrap_or(0);
-                inner.record(Event::DiskRead { node, file: fid, offset, len });
+                inner.record(Event::DiskRead {
+                    node,
+                    file: fid,
+                    offset,
+                    len,
+                });
                 let d = SimFile::latency(&mut inner, 2);
                 inner.schedule(d, Action::Fire(Arc::clone(&slot)));
             }
@@ -823,7 +923,9 @@ impl File for SimFile {
         let node = self.node;
         let name = self.name.clone();
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Err(crate::traits::eio("kernel gone")) };
+            let Some(k) = kernel.upgrade() else {
+                return Err(crate::traits::eio("kernel gone"));
+            };
             let slot = TimerSlot::new();
             let covered;
             {
@@ -837,7 +939,11 @@ impl File for SimFile {
                 // is what makes the barrier a barrier.
                 covered = f.pending.len();
                 inner.stats.fsyncs += 1;
-                inner.record(Event::Fsync { node, file: fid, pending: covered });
+                inner.record(Event::Fsync {
+                    node,
+                    file: fid,
+                    pending: covered,
+                });
                 let d = SimFile::latency(&mut inner, 1);
                 inner.schedule(d, Action::Fire(Arc::clone(&slot)));
             }
@@ -868,7 +974,9 @@ impl File for SimFile {
         let node = self.node;
         let name = self.name.clone();
         Box::pin(async move {
-            let Some(k) = kernel.upgrade() else { return Err(crate::traits::eio("kernel gone")) };
+            let Some(k) = kernel.upgrade() else {
+                return Err(crate::traits::eio("kernel gone"));
+            };
             let slot = TimerSlot::new();
             {
                 let mut inner = k.lock();
@@ -881,7 +989,11 @@ impl File for SimFile {
                 let fid = f.id;
                 f.view.truncate(to as usize);
                 f.pending.push(PendingOp::Truncate(to));
-                inner.record(Event::Truncate { node, file: fid, to });
+                inner.record(Event::Truncate {
+                    node,
+                    file: fid,
+                    to,
+                });
                 let d = SimFile::latency(&mut inner, 0);
                 inner.schedule(d, Action::Fire(Arc::clone(&slot)));
             }
@@ -898,14 +1010,26 @@ struct SimSpawner {
 
 impl Spawner for SimSpawner {
     fn spawn(&self, name: &str, fut: BoxFuture<'static, ()>) {
-        let Some(k) = self.kernel.upgrade() else { return };
+        let Some(k) = self.kernel.upgrade() else {
+            return;
+        };
         let mut inner = k.lock();
         let id = inner.next_task;
         inner.next_task += 1;
         inner.stats.tasks_spawned += 1;
-        inner.tasks.insert(id, TaskSlot { node: self.node, name: name.to_string(), fut: Some(fut) });
+        inner.tasks.insert(
+            id,
+            TaskSlot {
+                node: self.node,
+                name: name.to_string(),
+                fut: Some(fut),
+            },
+        );
         inner.ready.insert(id);
-        inner.record(Event::Spawn { node: self.node, task: id });
+        inner.record(Event::Spawn {
+            node: self.node,
+            task: id,
+        });
     }
 
     fn yield_now(&self) -> BoxFuture<'static, ()> {
@@ -921,10 +1045,15 @@ struct SimTracer {
 
 impl Tracer for SimTracer {
     fn note(&self, text: &str) {
-        let Some(k) = self.kernel.upgrade() else { return };
+        let Some(k) = self.kernel.upgrade() else {
+            return;
+        };
         let mut inner = k.lock();
         let node = self.node;
-        inner.record(Event::Note { node, text: text.to_string() });
+        inner.record(Event::Note {
+            node,
+            text: text.to_string(),
+        });
     }
 
     fn enabled(&self) -> bool {
@@ -947,7 +1076,11 @@ pub struct Sim {
 impl Sim {
     pub fn new(seed: u64, policy: FaultPolicy, mode: TraceMode) -> Sim {
         let notes_enabled = Arc::new(AtomicBool::new(!matches!(mode, TraceMode::HashOnly)));
-        Sim { k: Kernel::new(seed, policy, mode), notes_enabled, seed }
+        Sim {
+            k: Kernel::new(seed, policy, mode),
+            notes_enabled,
+            seed,
+        }
     }
 
     pub fn seed(&self) -> u64 {
@@ -982,7 +1115,10 @@ impl Sim {
             let (max_skew, max_drift) = if role == Role::Client {
                 (0, 0)
             } else {
-                (inner.policy.clock.max_skew.0, inner.policy.clock.max_drift_ppm)
+                (
+                    inner.policy.clock.max_skew.0,
+                    inner.policy.clock.max_drift_ppm,
+                )
             };
             let skew = if max_skew == 0 {
                 0
@@ -1026,11 +1162,23 @@ impl Sim {
         };
         Host {
             node,
-            clock: Arc::new(SimClock { kernel: Weak::clone(&w), node }),
-            net: Arc::new(SimNet { kernel: Weak::clone(&w), node }),
-            storage: Arc::new(SimStorage { kernel: Weak::clone(&w), node }),
+            clock: Arc::new(SimClock {
+                kernel: Weak::clone(&w),
+                node,
+            }),
+            net: Arc::new(SimNet {
+                kernel: Weak::clone(&w),
+                node,
+            }),
+            storage: Arc::new(SimStorage {
+                kernel: Weak::clone(&w),
+                node,
+            }),
             rng,
-            spawner: Arc::new(SimSpawner { kernel: Weak::clone(&w), node }),
+            spawner: Arc::new(SimSpawner {
+                kernel: Weak::clone(&w),
+                node,
+            }),
             tracer: Arc::new(SimTracer {
                 kernel: w,
                 node,
@@ -1057,7 +1205,9 @@ impl Sim {
     fn boot_node(&self, id: NodeId) {
         {
             let mut inner = self.k.lock();
-            let Some(n) = inner.nodes.get_mut(&id) else { return };
+            let Some(n) = inner.nodes.get_mut(&id) else {
+                return;
+            };
             if n.up {
                 return;
             }
@@ -1065,7 +1215,11 @@ impl Sim {
             n.paused = false;
             n.boots += 1;
             let first = n.boots == 1;
-            inner.record(if first { Event::Boot { node: id } } else { Event::Restart { node: id } });
+            inner.record(if first {
+                Event::Boot { node: id }
+            } else {
+                Event::Restart { node: id }
+            });
             if !first {
                 inner.stats.restarts += 1;
             }
@@ -1133,7 +1287,12 @@ impl Sim {
     /// Snapshot of who is reachable from whom, for oracle use.
     pub fn alive(&self) -> Vec<NodeId> {
         let inner = self.k.lock();
-        inner.nodes.iter().filter(|(_, n)| n.up && !n.paused).map(|(id, _)| *id).collect()
+        inner
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.up && !n.paused)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Whether any link is currently cut.
@@ -1156,7 +1315,12 @@ impl Sim {
     }
 
     pub fn is_up(&self, node: NodeId) -> bool {
-        self.k.lock().nodes.get(&node).map(|n| n.up && !n.paused).unwrap_or(false)
+        self.k
+            .lock()
+            .nodes
+            .get(&node)
+            .map(|n| n.up && !n.paused)
+            .unwrap_or(false)
     }
 
     pub fn crash(&self, node: NodeId) {
@@ -1188,7 +1352,10 @@ impl Sim {
             return;
         }
         let mut inner = self.k.lock();
-        inner.record(Event::Note { node, text: text.into() });
+        inner.record(Event::Note {
+            node,
+            text: text.into(),
+        });
     }
 
     pub fn with_trace<R>(&self, f: impl FnOnce(&Recorder) -> R) -> R {
@@ -1200,7 +1367,9 @@ impl Sim {
         let mut wake = Vec::new();
         {
             let mut inner = self.k.lock();
-            let Some(n) = inner.nodes.get_mut(&node) else { return };
+            let Some(n) = inner.nodes.get_mut(&node) else {
+                return;
+            };
             if !n.up {
                 return;
             }
@@ -1251,7 +1420,9 @@ impl Sim {
                 self.poll_task(id);
                 polls_since_time_moved += 1;
                 if polls_since_time_moved > livelock_budget {
-                    return Outcome::Livelock { polls: polls_since_time_moved };
+                    return Outcome::Livelock {
+                        polls: polls_since_time_moved,
+                    };
                 }
                 continue;
             }
@@ -1281,8 +1452,12 @@ impl Sim {
         // Also garbage-collect ready entries for tasks that no longer exist
         // (reaped by a crash) so the set does not grow without bound.
         if runnable.is_empty() {
-            let stale: Vec<TaskId> =
-                inner.ready.iter().copied().filter(|id| !inner.tasks.contains_key(id)).collect();
+            let stale: Vec<TaskId> = inner
+                .ready
+                .iter()
+                .copied()
+                .filter(|id| !inner.tasks.contains_key(id))
+                .collect();
             for id in stale {
                 inner.ready.remove(&id);
             }
@@ -1297,7 +1472,9 @@ impl Sim {
     fn poll_task(&self, id: TaskId) {
         let (mut fut, node) = {
             let mut inner = self.k.lock();
-            let Some(slot) = inner.tasks.get_mut(&id) else { return };
+            let Some(slot) = inner.tasks.get_mut(&id) else {
+                return;
+            };
             let node = slot.node;
             let Some(fut) = slot.fut.take() else {
                 // Already being polled: impossible in a single-threaded kernel,
@@ -1312,9 +1489,8 @@ impl Sim {
 
         let waker = make_waker(id, &self.k);
         let mut cx = Context::from_waker(&waker);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            fut.as_mut().poll(&mut cx)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.as_mut().poll(&mut cx)));
 
         let mut inner = self.k.lock();
         inner.current = None;
@@ -1369,7 +1545,11 @@ impl Sim {
         if tied.is_empty() {
             return None;
         }
-        let idx = if tied.len() == 1 { 0 } else { inner.rng.below(tied.len() as u64) as usize };
+        let idx = if tied.len() == 1 {
+            0
+        } else {
+            inner.rng.below(tied.len() as u64) as usize
+        };
         let chosen = tied.swap_remove(idx);
         for t in tied {
             inner.timers.push(Reverse(t));
@@ -1392,17 +1572,32 @@ impl Sim {
                         wake.push(w);
                     }
                 }
-                Action::Deliver { from, to, msg, payload } => {
+                Action::Deliver {
+                    from,
+                    to,
+                    msg,
+                    payload,
+                } => {
                     let len = payload.len();
                     let up = inner.nodes.get(&to).map(|n| n.up).unwrap_or(false);
                     if !up {
                         inner.stats.msgs_dropped += 1;
-                        inner.record(Event::Dropped { from, to, msg, why: DropReason::NodeDown });
+                        inner.record(Event::Dropped {
+                            from,
+                            to,
+                            msg,
+                            why: DropReason::NodeDown,
+                        });
                     } else {
                         inner.stats.msgs_delivered += 1;
                         inner.record(Event::Deliver { from, to, msg, len });
                         if let Some(n) = inner.nodes.get_mut(&to) {
-                            n.mailbox.push_back(Envelope { from, to, payload, msg_id: msg });
+                            n.mailbox.push_back(Envelope {
+                                from,
+                                to,
+                                payload,
+                                msg_id: msg,
+                            });
                             wake.append(&mut n.recv_waiters);
                         }
                     }
@@ -1463,8 +1658,12 @@ fn power_loss(inner: &mut Inner, node: NodeId) {
     };
     for name in names {
         let (pending, fid) = {
-            let Some(n) = inner.nodes.get_mut(&node) else { return };
-            let Some(f) = n.files.get_mut(&name) else { continue };
+            let Some(n) = inner.nodes.get_mut(&node) else {
+                return;
+            };
+            let Some(f) = n.files.get_mut(&name) else {
+                continue;
+            };
             (std::mem::take(&mut f.pending), f.id)
         };
         for op in pending {
@@ -1472,9 +1671,16 @@ fn power_loss(inner: &mut Inner, node: NodeId) {
                 PendingOp::Truncate(len) => {
                     // A truncate either happened or it did not; it cannot tear.
                     if inner.rng.ppm(lost_ppm) {
-                        inner.record(Event::LostWrite { node, file: fid, offset: len, len: 0 });
-                    } else if let Some(f) =
-                        inner.nodes.get_mut(&node).and_then(|n| n.files.get_mut(&name))
+                        inner.record(Event::LostWrite {
+                            node,
+                            file: fid,
+                            offset: len,
+                            len: 0,
+                        });
+                    } else if let Some(f) = inner
+                        .nodes
+                        .get_mut(&node)
+                        .and_then(|n| n.files.get_mut(&name))
                     {
                         f.durable.truncate(len as usize);
                     }
@@ -1514,15 +1720,20 @@ fn power_loss(inner: &mut Inner, node: NodeId) {
                             of: total,
                         });
                         if keep_bytes > 0 {
-                            if let Some(f) =
-                                inner.nodes.get_mut(&node).and_then(|n| n.files.get_mut(&name))
+                            if let Some(f) = inner
+                                .nodes
+                                .get_mut(&node)
+                                .and_then(|n| n.files.get_mut(&name))
                             {
                                 splice(&mut f.durable, offset, &data[..keep_bytes as usize]);
                             }
                         }
                         continue;
                     }
-                    if let Some(f) = inner.nodes.get_mut(&node).and_then(|n| n.files.get_mut(&name))
+                    if let Some(f) = inner
+                        .nodes
+                        .get_mut(&node)
+                        .and_then(|n| n.files.get_mut(&name))
                     {
                         splice(&mut f.durable, offset, &data);
                     }
@@ -1530,7 +1741,11 @@ fn power_loss(inner: &mut Inner, node: NodeId) {
             }
         }
         // The page cache is gone. What you see after a reboot is the platter.
-        if let Some(f) = inner.nodes.get_mut(&node).and_then(|n| n.files.get_mut(&name)) {
+        if let Some(f) = inner
+            .nodes
+            .get_mut(&node)
+            .and_then(|n| n.files.get_mut(&name))
+        {
             f.view = f.durable.clone();
         }
     }
@@ -1573,7 +1788,11 @@ fn chaos_tick(inner: &mut Inner) -> Nanos {
                     *inner.blocked.entry((y, x)).or_insert(0) += 1;
                     links.push((y, x));
                 }
-                inner.record(Event::Partition { a: x, b: y, one_way });
+                inner.record(Event::Partition {
+                    a: x,
+                    b: y,
+                    one_way,
+                });
             }
         }
         inner.stats.partitions += 1;
@@ -1586,7 +1805,13 @@ fn chaos_tick(inner: &mut Inner) -> Nanos {
         let candidates: Vec<NodeId> = servers
             .iter()
             .copied()
-            .filter(|id| inner.nodes.get(id).map(|n| n.up && !n.paused).unwrap_or(false))
+            .filter(|id| {
+                inner
+                    .nodes
+                    .get(id)
+                    .map(|n| n.up && !n.paused)
+                    .unwrap_or(false)
+            })
             .collect();
         if let Some(i) = inner.rng.pick_index(candidates.len()) {
             let node = candidates[i];
@@ -1618,8 +1843,11 @@ fn chaos_tick(inner: &mut Inner) -> Nanos {
 
     // --- crashes ----------------------------------------------------------
     if inner.rng.ppm(scale(policy.crash_ppm_per_sec)) {
-        let alive: Vec<NodeId> =
-            servers.iter().copied().filter(|id| inner.nodes[id].up).collect();
+        let alive: Vec<NodeId> = servers
+            .iter()
+            .copied()
+            .filter(|id| inner.nodes[id].up)
+            .collect();
         if alive.len() > policy.min_alive {
             if let Some(i) = inner.rng.pick_index(alive.len()) {
                 let node = alive[i];
@@ -1643,7 +1871,9 @@ fn policy_step_ppm(inner: &Inner) -> u32 {
 /// exist, and waking under the lock is the one thing this kernel must never do.
 fn crash_in_lock(inner: &mut Inner, node: NodeId) {
     {
-        let Some(n) = inner.nodes.get_mut(&node) else { return };
+        let Some(n) = inner.nodes.get_mut(&node) else {
+            return;
+        };
         if !n.up {
             return;
         }
@@ -1654,8 +1884,12 @@ fn crash_in_lock(inner: &mut Inner, node: NodeId) {
     }
     inner.stats.crashes += 1;
     inner.record(Event::Crash { node });
-    let doomed: Vec<TaskId> =
-        inner.tasks.iter().filter(|(_, s)| s.node == node).map(|(id, _)| *id).collect();
+    let doomed: Vec<TaskId> = inner
+        .tasks
+        .iter()
+        .filter(|(_, s)| s.node == node)
+        .map(|(id, _)| *id)
+        .collect();
     for id in doomed {
         inner.tasks.remove(&id);
         inner.ready.remove(&id);

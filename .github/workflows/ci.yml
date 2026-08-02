@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo test --workspace --release
+
+  # The rules the codebase holds itself to are only real if something enforces
+  # them. A grep is crude and catches the exact mistakes that actually happen.
+  discipline:
+    name: no ambient nondeterminism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: core crates must have no third-party dependencies
+        run: |
+          for crate in chrono-sim chronolog chrono-oracle; do
+            deps=$(awk '/^\[dependencies\]/{f=1;next}/^\[/{f=0}f' "crates/$crate/Cargo.toml" \
+                   | grep -vE '^\s*(#|$)' | grep -vE '^(chrono-sim|chronolog|chrono-oracle)\b' || true)
+            if [ -n "$deps" ]; then
+              echo "::error::$crate has third-party dependencies:"; echo "$deps"; exit 1
+            fi
+          done
+      # Both checks below strip comment lines first — the codebase talks about
+      # these bans a lot, and matching prose would make the check useless
+      # noise. A genuine exception carries an explicit `ci-allow:` marker so it
+      # is a deliberate, reviewable act rather than a silent one.
+      - name: no wall clock outside the real runtime
+        run: |
+          hits=$(grep -rn --include='*.rs' -E '(SystemTime::now|Instant::now)' crates/ \
+                 | grep -vE ':[[:space:]]*//' \
+                 | grep -v 'ci-allow:' \
+                 | grep -v 'crates/chrono-sim/src/real.rs' \
+                 | grep -v '/tests/' \
+                 | grep -v '^crates/chronoscope/' \
+                 | grep -v '^crates/chronolog-server/' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::wall clock read outside the real runtime:"; echo "$hits"; exit 1
+          fi
+      - name: no HashMap in simulated paths
+        run: |
+          hits=$(grep -rn --include='*.rs' -E '\b(HashMap|HashSet)\b' \
+                 crates/chrono-sim/src crates/chronolog/src crates/chrono-oracle/src \
+                 | grep -vE ':[[:space:]]*//' | grep -v 'ci-allow:' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::HashMap/HashSet iteration order is randomized per process; use BTree*:"
+            echo "$hits"; exit 1
+          fi
+
+  determinism:
+    name: determinism guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p chronoscope
+      # Every seed twice, event-trace hashes diffed. This is the claim the whole
+      # project rests on, so it runs on every push — and on a different
+      # architecture from the laptop these seeds were developed on, which is
+      # exactly where a float or a hash-order dependency would show up.
+      - run: ./target/release/chronoscope check --seeds 64 --secs 300
+
+  swarm:
+    name: swarm (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p chronoscope
+      - name: run 250 seeds
+        run: |
+          ./target/release/chronoscope swarm \
+            --seeds 250 --from $(( ${{ matrix.shard }} * 250 )) \
+            --secs 400 --keys 4 --clients 4 --out artifacts
+      - name: upload failing seeds
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failing-seeds-${{ matrix.shard }}
+          path: artifacts/
+          if-no-files-found: ignore

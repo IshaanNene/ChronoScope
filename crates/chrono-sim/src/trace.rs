@@ -48,34 +48,127 @@ impl DropReason {
 /// One thing that happened, at one virtual instant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Boot { node: NodeId },
-    Spawn { node: NodeId, task: u64 },
-    Poll { node: NodeId, task: u64 },
-    TaskDone { node: NodeId, task: u64 },
-    Sleep { node: NodeId, task: u64, until: Nanos },
-    Send { from: NodeId, to: NodeId, msg: u64, len: usize },
-    Deliver { from: NodeId, to: NodeId, msg: u64, len: usize },
-    Dropped { from: NodeId, to: NodeId, msg: u64, why: DropReason },
-    Duplicated { from: NodeId, to: NodeId, msg: u64 },
-    Corrupted { from: NodeId, to: NodeId, msg: u64, byte: usize },
-    DiskWrite { node: NodeId, file: u64, offset: u64, len: usize },
-    DiskRead { node: NodeId, file: u64, offset: u64, len: usize },
-    Fsync { node: NodeId, file: u64, pending: usize },
-    Truncate { node: NodeId, file: u64, to: u64 },
-    TornWrite { node: NodeId, file: u64, offset: u64, kept: u64, of: u64 },
-    LostWrite { node: NodeId, file: u64, offset: u64, len: usize },
-    Enospc { node: NodeId, file: u64 },
-    Crash { node: NodeId },
-    Restart { node: NodeId },
-    Partition { a: NodeId, b: NodeId, one_way: bool },
-    Heal { a: NodeId, b: NodeId },
-    Pause { node: NodeId, until: Nanos },
-    Resume { node: NodeId },
-    ClockStep { node: NodeId, delta: i64 },
+    Boot {
+        node: NodeId,
+    },
+    Spawn {
+        node: NodeId,
+        task: u64,
+    },
+    Poll {
+        node: NodeId,
+        task: u64,
+    },
+    TaskDone {
+        node: NodeId,
+        task: u64,
+    },
+    Sleep {
+        node: NodeId,
+        task: u64,
+        until: Nanos,
+    },
+    Send {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+        len: usize,
+    },
+    Deliver {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+        len: usize,
+    },
+    Dropped {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+        why: DropReason,
+    },
+    Duplicated {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+    },
+    Corrupted {
+        from: NodeId,
+        to: NodeId,
+        msg: u64,
+        byte: usize,
+    },
+    DiskWrite {
+        node: NodeId,
+        file: u64,
+        offset: u64,
+        len: usize,
+    },
+    DiskRead {
+        node: NodeId,
+        file: u64,
+        offset: u64,
+        len: usize,
+    },
+    Fsync {
+        node: NodeId,
+        file: u64,
+        pending: usize,
+    },
+    Truncate {
+        node: NodeId,
+        file: u64,
+        to: u64,
+    },
+    TornWrite {
+        node: NodeId,
+        file: u64,
+        offset: u64,
+        kept: u64,
+        of: u64,
+    },
+    LostWrite {
+        node: NodeId,
+        file: u64,
+        offset: u64,
+        len: usize,
+    },
+    Enospc {
+        node: NodeId,
+        file: u64,
+    },
+    Crash {
+        node: NodeId,
+    },
+    Restart {
+        node: NodeId,
+    },
+    Partition {
+        a: NodeId,
+        b: NodeId,
+        one_way: bool,
+    },
+    Heal {
+        a: NodeId,
+        b: NodeId,
+    },
+    Pause {
+        node: NodeId,
+        until: Nanos,
+    },
+    Resume {
+        node: NodeId,
+    },
+    ClockStep {
+        node: NodeId,
+        delta: i64,
+    },
     /// Application-level annotation. `chronolog` uses these to mark elections,
     /// commits, and client operations so a failing trace reads as a story
     /// rather than as packet soup.
-    Note { node: NodeId, text: String },
+    Note {
+        node: NodeId,
+        text: String,
+    },
 }
 
 impl Event {
@@ -147,7 +240,9 @@ impl Event {
         h.byte(self.tag());
         let mut u = |v: u64| h.u64(v);
         match self {
-            Event::Boot { node } | Event::Crash { node } | Event::Restart { node }
+            Event::Boot { node }
+            | Event::Crash { node }
+            | Event::Restart { node }
             | Event::Resume { node } => u(*node as u64),
             Event::Spawn { node, task }
             | Event::Poll { node, task }
@@ -177,20 +272,39 @@ impl Event {
                 u(*to as u64);
                 u(*msg);
             }
-            Event::Corrupted { from, to, msg, byte } => {
+            Event::Corrupted {
+                from,
+                to,
+                msg,
+                byte,
+            } => {
                 u(*from as u64);
                 u(*to as u64);
                 u(*msg);
                 u(*byte as u64);
             }
-            Event::DiskWrite { node, file, offset, len }
-            | Event::DiskRead { node, file, offset, len } => {
+            Event::DiskWrite {
+                node,
+                file,
+                offset,
+                len,
+            }
+            | Event::DiskRead {
+                node,
+                file,
+                offset,
+                len,
+            } => {
                 u(*node as u64);
                 u(*file);
                 u(*offset);
                 u(*len as u64);
             }
-            Event::Fsync { node, file, pending } => {
+            Event::Fsync {
+                node,
+                file,
+                pending,
+            } => {
                 u(*node as u64);
                 u(*file);
                 u(*pending as u64);
@@ -200,14 +314,25 @@ impl Event {
                 u(*file);
                 u(*to);
             }
-            Event::TornWrite { node, file, offset, kept, of } => {
+            Event::TornWrite {
+                node,
+                file,
+                offset,
+                kept,
+                of,
+            } => {
                 u(*node as u64);
                 u(*file);
                 u(*offset);
                 u(*kept);
                 u(*of);
             }
-            Event::LostWrite { node, file, offset, len } => {
+            Event::LostWrite {
+                node,
+                file,
+                offset,
+                len,
+            } => {
                 u(*node as u64);
                 u(*file);
                 u(*offset);
@@ -258,30 +383,64 @@ impl fmt::Display for Event {
                 write!(f, "n{from} -> n{to} DROP #{msg} ({})", why.as_str())
             }
             Event::Duplicated { from, to, msg } => write!(f, "n{from} -> n{to} DUP #{msg}"),
-            Event::Corrupted { from, to, msg, byte } => {
+            Event::Corrupted {
+                from,
+                to,
+                msg,
+                byte,
+            } => {
                 write!(f, "n{from} -> n{to} CORRUPT #{msg} @byte {byte}")
             }
-            Event::DiskWrite { node, file, offset, len } => {
+            Event::DiskWrite {
+                node,
+                file,
+                offset,
+                len,
+            } => {
                 write!(f, "n{node} write f{file:x} @{offset} {len}B")
             }
-            Event::DiskRead { node, file, offset, len } => {
+            Event::DiskRead {
+                node,
+                file,
+                offset,
+                len,
+            } => {
                 write!(f, "n{node} read f{file:x} @{offset} {len}B")
             }
-            Event::Fsync { node, file, pending } => {
+            Event::Fsync {
+                node,
+                file,
+                pending,
+            } => {
                 write!(f, "n{node} fsync f{file:x} ({pending} pending)")
             }
             Event::Truncate { node, file, to } => write!(f, "n{node} truncate f{file:x} -> {to}"),
-            Event::TornWrite { node, file, offset, kept, of } => {
+            Event::TornWrite {
+                node,
+                file,
+                offset,
+                kept,
+                of,
+            } => {
                 write!(f, "n{node} TORN f{file:x} @{offset} kept {kept}/{of}B")
             }
-            Event::LostWrite { node, file, offset, len } => {
+            Event::LostWrite {
+                node,
+                file,
+                offset,
+                len,
+            } => {
                 write!(f, "n{node} LOST WRITE f{file:x} @{offset} {len}B")
             }
             Event::Enospc { node, file } => write!(f, "n{node} ENOSPC f{file:x}"),
             Event::Crash { node } => write!(f, "n{node} *** CRASH ***"),
             Event::Restart { node } => write!(f, "n{node} *** RESTART ***"),
             Event::Partition { a, b, one_way } => {
-                write!(f, "PARTITION n{a} {} n{b}", if *one_way { "-/->" } else { "<-/->" })
+                write!(
+                    f,
+                    "PARTITION n{a} {} n{b}",
+                    if *one_way { "-/->" } else { "<-/->" }
+                )
             }
             Event::Heal { a, b } => write!(f, "HEAL n{a} <--> n{b}"),
             Event::Pause { node, until } => write!(f, "n{node} PAUSE until {until}"),
@@ -457,20 +616,33 @@ mod tests {
     fn rec(mode: TraceMode) -> Recorder {
         let mut r = Recorder::new(mode);
         for i in 0..100u64 {
-            r.record(Nanos(i * 1000), i, Event::Poll { node: (i % 3) as u32, task: i });
+            r.record(
+                Nanos(i * 1000),
+                i,
+                Event::Poll {
+                    node: (i % 3) as u32,
+                    task: i,
+                },
+            );
         }
         r
     }
 
     #[test]
     fn identical_streams_hash_identically() {
-        assert_eq!(rec(TraceMode::HashOnly).hash(), rec(TraceMode::HashOnly).hash());
+        assert_eq!(
+            rec(TraceMode::HashOnly).hash(),
+            rec(TraceMode::HashOnly).hash()
+        );
     }
 
     #[test]
     fn trace_mode_does_not_affect_the_hash() {
         assert_eq!(rec(TraceMode::HashOnly).hash(), rec(TraceMode::Full).hash());
-        assert_eq!(rec(TraceMode::HashOnly).hash(), rec(TraceMode::Tail(5)).hash());
+        assert_eq!(
+            rec(TraceMode::HashOnly).hash(),
+            rec(TraceMode::Tail(5)).hash()
+        );
     }
 
     #[test]
@@ -488,8 +660,26 @@ mod tests {
     fn a_single_differing_field_changes_the_hash() {
         let mut a = Recorder::new(TraceMode::HashOnly);
         let mut b = Recorder::new(TraceMode::HashOnly);
-        a.record(Nanos(1), 0, Event::Send { from: 0, to: 1, msg: 7, len: 64 });
-        b.record(Nanos(1), 0, Event::Send { from: 0, to: 1, msg: 7, len: 65 });
+        a.record(
+            Nanos(1),
+            0,
+            Event::Send {
+                from: 0,
+                to: 1,
+                msg: 7,
+                len: 64,
+            },
+        );
+        b.record(
+            Nanos(1),
+            0,
+            Event::Send {
+                from: 0,
+                to: 1,
+                msg: 7,
+                len: 65,
+            },
+        );
         assert_ne!(a.hash(), b.hash());
     }
 
@@ -517,6 +707,9 @@ mod tests {
 
     #[test]
     fn no_divergence_when_identical() {
-        assert_eq!(Recorder::first_divergence(&rec(TraceMode::HashOnly), &rec(TraceMode::HashOnly)), None);
+        assert_eq!(
+            Recorder::first_divergence(&rec(TraceMode::HashOnly), &rec(TraceMode::HashOnly)),
+            None
+        );
     }
 }

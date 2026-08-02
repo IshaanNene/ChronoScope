@@ -28,7 +28,7 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] Fault policy sampled from the same PRNG
 - [x] Trace recorder + rolling trace hash
 - [x] Determinism guard — run each seed twice, diff rolling hash
-- [ ] Real runtime implementations of every trait
+- [x] Real runtime implementations of every trait
 
 ## Layer 2 — `chronolog` (system under test)
 
@@ -40,37 +40,97 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] Snapshotting + log compaction + `InstallSnapshot`
 - [x] Membership changes via joint consensus (`C_old,new` → `C_new`)
 - [x] Linearizable reads: leader lease + `ReadIndex`
-- [ ] KV state machine with per-key MVCC
-- [~] Client session layer: types + codec done; dedup table lands with the KV state machine
+- [x] KV state machine with per-key MVCC
+- [x] Client session layer: idempotent request IDs, dedup table, `NotLeader` redirect, jittered backoff
 
 ## Layer 3 — oracles
 
-- [ ] Linearizability checker (Wing & Gong, memoised, per-key decomposition)
-- [ ] Raft invariants: Election Safety, Log Matching, Leader Completeness, State Machine Safety
-- [ ] Liveness watchdog
-- [ ] Durability oracle: acknowledged writes survive crash
+- [x] Linearizability checker (Wing & Gong, memoised, per-key decomposition)
+- [x] Raft invariants: Election Safety, Log Matching, Leader Completeness, State Machine Safety
+- [x] Liveness watchdog
+- [x] Durability oracle: acknowledged writes survive crash
 
 ## Layer 4 — production runtime
 
-- [ ] `chronolog-server` binary on the `real` traits
-- [ ] Prometheus `/metrics`, `/debug/raft`, `/health`
-- [ ] `io_uring` storage backend, feature-gated for Linux
+- [x] `chronolog-server` binary on the `real` traits
+- [x] Prometheus `/metrics`, `/debug/raft`, `/health`
+- [!] `io_uring` storage backend — **not built**, see the work log for why
 
 ## Layer 5 — the swarm
 
-- [ ] `chronoscope run --seed` / `replay` / `swarm` / `check`
-- [ ] Swarm: N seeds across J workers, failing seeds as artifacts
-- [ ] GitHub Actions: determinism guard + swarm matrix
+- [x] `chronoscope run --seed` / `replay` / `swarm` / `check`
+- [x] Swarm: N seeds across J workers, failing seeds as artifacts
+- [x] GitHub Actions: determinism guard + swarm matrix
+
+## Deployment
+
+- [x] Dockerfile (distroless, non-root)
+- [x] Kubernetes StatefulSet + headless Service
+- [x] Helm chart
+- [x] Terraform (namespace, PDB, odd-replica validation)
 
 ## Evidence
 
-- [ ] `BUGS.md` — bug ledger, each entry with a reproducing seed
-- [ ] `README.md` with architecture + demo script
-- [ ] Benchmarks: throughput / p99
+- [x] `BUGS.md` — bug ledger, each entry with a reproducing seed
+- [x] `README.md` with architecture + demo script
+- [x] Benchmarks: throughput / p99
 
 ---
 
 ## Work log
+
+### 2026-08-02 — Layers 3–5, and the bug hunt (`c915553`, `3c9804c`, + this)
+
+**Done and green: 199 tests, 0 clippy warnings, a 150-seed swarm at 0 failures.**
+
+Measured, on this machine:
+
+| | |
+|---|---|
+| swarm | 150 seeds, 65.0 node-hours simulated in 70.6s — **3315x** |
+| determinism | 48 seeds x2, every trace hash identical |
+| throughput | 7,398 writes/sec, p50 30ms, 7.9 entries/fsync |
+| real cluster | 3 nodes on real UDP + real `fsync`, leader elected in term 1 |
+
+**Nine bugs, eight fixed, one open — all in [`BUGS.md`](BUGS.md).** The pattern
+worth recording: *almost none of them presented anywhere near their cause.* A
+follower that silently stopped replicating turned out to be a WAL gap written
+four minutes earlier. Two replicas disagreeing at index 7567 turned out to be
+the `ReadIndex` heartbeat path. The diagnostic technique that actually worked
+was always the same — assert the invariant at the point it should hold, not
+where the symptom appears — and it is why the driver now reconciles the WAL
+against the log every cycle instead of trusting a watermark.
+
+**Two of the nine were bugs in the oracles**, which is worth being loud about.
+A checker that reports a correct history as a violation is worse than no
+checker: in the first 400-seed swarm the false positives buried every real
+failure. Both are fixed with regression tests reduced from the runs that
+exposed them.
+
+**The biggest single lesson** came from the first scenario run: it finished in
+0.27 seconds and reported everything clean. The workload was ending after a
+fixed operation count — a few simulated seconds — so a chaos policy quoted in
+events-per-second never fired once. A green result meant nothing had happened,
+not that nothing was wrong. `duration` now drives the run and
+`max_ops_per_client` is only a memory cap.
+
+**Decisions worth recording:**
+- **`io_uring` was not built.** It is Linux-only, this was written on macOS,
+  and a storage backend that cannot be tested on the machine that wrote it is
+  worse than an honest `std::fs` one. The seam is the `Storage` trait — an
+  `io_uring` backend is a new type implementing four methods with nothing above
+  it changing, which is the whole argument for the trait boundary. Claiming it
+  worked would have been the one dishonest thing in the repository.
+- **The real transport is UDP, not TCP.** `Network` is a datagram interface
+  because that is the model Raft is specified against; UDP implements it
+  directly rather than having a reliable stream pretend. The real cost is
+  `InstallSnapshot` above the datagram limit, which is documented and argues
+  for chunked snapshot transfer rather than for TCP.
+- **Hard state is only fsynced when term or vote changes.** Raft requires those
+  to be durable; the commit index is an optimization. Worth 18% throughput.
+- **Seeds are only reproducible for a fixed binary.** Changing the code shifts
+  the PRNG draws, so a seed is a handle on a bug *at a commit*. `BUGS.md` says
+  so out loud rather than letting half its reproductions quietly rot.
 
 ### 2026-08-02 — Layer 2, part 1 (`9db8574`, `5fb8182`)
 

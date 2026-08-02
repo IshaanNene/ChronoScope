@@ -66,10 +66,7 @@ impl Default for DiskPolicy {
     fn default() -> Self {
         Self {
             // An NVMe write is fast; the fsync is what costs you.
-            write_latency: LatencyDist::new(vec![
-                (980, 8_000, 40_000),
-                (20, 40_000, 900_000),
-            ]),
+            write_latency: LatencyDist::new(vec![(980, 8_000, 40_000), (20, 40_000, 900_000)]),
             fsync_latency: LatencyDist::new(vec![
                 (900, 200_000, 800_000),
                 (95, 800_000, 5_000_000),

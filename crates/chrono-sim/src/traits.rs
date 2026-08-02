@@ -230,7 +230,9 @@ impl Host {
 
 impl std::fmt::Debug for Host {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Host").field("node", &self.node).finish_non_exhaustive()
+        f.debug_struct("Host")
+            .field("node", &self.node)
+            .finish_non_exhaustive()
     }
 }
 
@@ -238,11 +240,11 @@ impl std::fmt::Debug for Host {
 /// than panic on. `ENOSPC` in particular: a WAL that panics when the disk fills
 /// is a WAL that loses the cluster.
 pub fn enospc() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, "ENOSPC: simulated disk full")
+    std::io::Error::other("ENOSPC: simulated disk full")
 }
 
 pub fn eio(what: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, format!("EIO: {what}"))
+    std::io::Error::other(format!("EIO: {what}"))
 }
 
 pub fn is_enospc(e: &std::io::Error) -> bool {

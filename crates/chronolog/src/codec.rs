@@ -75,7 +75,9 @@ impl Writer {
     }
 
     pub fn with_capacity(n: usize) -> Self {
-        Self { buf: Vec::with_capacity(n) }
+        Self {
+            buf: Vec::with_capacity(n),
+        }
     }
 
     pub fn u8(&mut self, v: u8) -> &mut Self {
@@ -201,7 +203,9 @@ impl<'a> Reader<'a> {
 
     pub fn u64(&mut self) -> Result<u64> {
         let b = self.take(8)?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     pub fn bool(&mut self) -> Result<bool> {
@@ -287,7 +291,11 @@ fn table() -> &'static [u32; 256] {
         for (i, slot) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0x82F6_3B78 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0x82F6_3B78 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *slot = c;
         }
@@ -351,7 +359,13 @@ mod tests {
     #[test]
     fn round_trips_every_primitive() {
         let mut w = Writer::new();
-        w.u8(7).u32(0xDEAD_BEEF).u64(u64::MAX).bool(true).bool(false).bytes(b"hello").str("wide");
+        w.u8(7)
+            .u32(0xDEAD_BEEF)
+            .u64(u64::MAX)
+            .bool(true)
+            .bool(false)
+            .bytes(b"hello")
+            .str("wide");
         w.seq(&[1u64, 2, 3], |w, v| {
             w.u64(*v);
         });

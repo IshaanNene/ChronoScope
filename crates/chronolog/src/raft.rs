@@ -206,6 +206,18 @@ pub struct Raft {
     // --- volatile --------------------------------------------------------
     commit: Index,
     applied: Index,
+    /// Highest index this node has actually made durable.
+    ///
+    /// Distinct from `log.last_index()`, and the distinction is load-bearing. A
+    /// leader counts itself toward the quorum that advances `commitIndex`; if
+    /// it counts its *in-memory* tail, then on a three-node cluster the leader
+    /// plus one follower is a quorum in which only the follower has the entry
+    /// on stable storage. The leader crashes, loses its un-fsynced tail, and
+    /// the entry survives on exactly one node of three — so a new leader can be
+    /// elected without it, and a committed entry is gone.
+    ///
+    /// A node's vote in its own quorum has to be backed by its disk.
+    persisted: Index,
     role: Role,
     leader: Option<NodeId>,
 
@@ -295,6 +307,7 @@ impl Raft {
             log,
             commit: 0,
             applied: 0,
+            persisted: 0,
             role: Role::Follower,
             leader: None,
             votes: BTreeMap::new(),
@@ -346,9 +359,19 @@ impl Raft {
         // if the tail was truncated by a torn write. Clamp it: claiming to have
         // committed entries you do not have is how a restart turns a storage
         // fault into a safety violation.
-        r.commit = hard.commit.min(r.log.last_index()).max(r.log.snapshot_index());
+        r.commit = hard
+            .commit
+            .min(r.log.last_index())
+            .max(r.log.snapshot_index());
         r.applied = r.log.snapshot_index();
-        r.persisted_hard_state = HardState { term: r.term, vote: r.vote, commit: r.commit };
+        // Everything recovery returned came off the disk, so it is durable by
+        // definition.
+        r.persisted = r.log.last_index();
+        r.persisted_hard_state = HardState {
+            term: r.term,
+            vote: r.vote,
+            commit: r.commit,
+        };
         r
     }
 
@@ -395,7 +418,11 @@ impl Raft {
     }
 
     pub fn hard_state(&self) -> HardState {
-        HardState { term: self.term, vote: self.vote, commit: self.commit }
+        HardState {
+            term: self.term,
+            vote: self.vote,
+            commit: self.commit,
+        }
     }
 
     /// A leader that has heard from a quorum recently enough to serve a lease
@@ -450,7 +477,11 @@ impl Raft {
             return None;
         }
         let index = self.log.last_index() + 1;
-        let entry = Entry { term: self.term, index, kind: EntryKind::Normal(data) };
+        let entry = Entry {
+            term: self.term,
+            index,
+            kind: EntryKind::Normal(data),
+        };
         self.append_to_own_log(&[entry]);
         self.broadcast_append();
         Some(index)
@@ -473,12 +504,20 @@ impl Raft {
         }
         // Also refuse if an uncommitted config change is already in the log,
         // even if it has not yet taken us into a joint state.
-        if self.log.entries_from(self.commit + 1).iter().any(|e| matches!(e.kind, EntryKind::Config(_)))
+        if self
+            .log
+            .entries_from(self.commit + 1)
+            .iter()
+            .any(|e| matches!(e.kind, EntryKind::Config(_)))
         {
             return None;
         }
         let index = self.log.last_index() + 1;
-        let entry = Entry { term: self.term, index, kind: EntryKind::Config(change) };
+        let entry = Entry {
+            term: self.term,
+            index,
+            kind: EntryKind::Config(change),
+        };
         self.append_to_own_log(&[entry]);
         // Appending a config change may have changed the voter set; make sure
         // every new member has a progress slot before we replicate to them.
@@ -530,7 +569,10 @@ impl Raft {
                 let matched = self.progress.get(&peer).map(|p| p.matched).unwrap_or(0);
                 self.send(
                     peer,
-                    Body::HeartbeatReq { commit: self.commit.min(matched), ctx },
+                    Body::HeartbeatReq {
+                        commit: self.commit.min(matched),
+                        ctx,
+                    },
                 );
             }
         }
@@ -586,22 +628,32 @@ impl Raft {
         }
 
         match msg.body {
-            Body::PreVoteReq { last_index, last_term } => {
-                self.handle_pre_vote_req(from, msg.term, last_index, last_term)
-            }
+            Body::PreVoteReq {
+                last_index,
+                last_term,
+            } => self.handle_pre_vote_req(from, msg.term, last_index, last_term),
             Body::PreVoteResp { granted } => self.handle_pre_vote_resp(from, msg.term, granted),
-            Body::VoteReq { last_index, last_term } => {
-                self.handle_vote_req(from, last_index, last_term)
-            }
+            Body::VoteReq {
+                last_index,
+                last_term,
+            } => self.handle_vote_req(from, last_index, last_term),
             Body::VoteResp { granted } => self.handle_vote_resp(from, granted),
-            Body::AppendReq { prev_index, prev_term, entries, commit } => {
-                self.handle_append(from, prev_index, prev_term, entries, commit)
-            }
-            Body::AppendResp { success, match_index, conflict_index, conflict_term } => {
-                self.handle_append_resp(from, success, match_index, conflict_index, conflict_term)
-            }
+            Body::AppendReq {
+                prev_index,
+                prev_term,
+                entries,
+                commit,
+            } => self.handle_append(from, prev_index, prev_term, entries, commit),
+            Body::AppendResp {
+                success,
+                match_index,
+                conflict_index,
+                conflict_term,
+            } => self.handle_append_resp(from, success, match_index, conflict_index, conflict_term),
             Body::SnapshotReq { snapshot } => self.handle_snapshot(from, snapshot),
-            Body::SnapshotResp { success, index } => self.handle_snapshot_resp(from, success, index),
+            Body::SnapshotResp { success, index } => {
+                self.handle_snapshot_resp(from, success, index)
+            }
             Body::HeartbeatReq { commit, ctx } => self.handle_heartbeat(from, commit, ctx),
             Body::HeartbeatResp { ctx } => self.handle_heartbeat_resp(from, ctx),
             Body::TimeoutNow => {
@@ -628,7 +680,22 @@ impl Raft {
         }
         if self.hard_state_dirty {
             let hs = self.hard_state();
-            if hs != self.persisted_hard_state {
+            // Only `term` and `vote` genuinely require stable storage — losing
+            // either lets a node vote twice in one term, which loses Election
+            // Safety and therefore everything.
+            //
+            // `commit` is an optimization: it saves replaying the log to
+            // rediscover what was already applied. Treating it as equally
+            // durable costs an extra fsync — to a *second* file, so it cannot
+            // be merged with the log's — on essentially every cycle, since the
+            // commit index advances constantly. Writing it only when the term
+            // or vote already forces a write roughly halves the durability
+            // barriers on the hot path. The cost is a little more replay after
+            // a restart, and `restore` clamps a stale commit index to the log
+            // anyway.
+            let must_persist = hs.term != self.persisted_hard_state.term
+                || hs.vote != self.persisted_hard_state.vote;
+            if must_persist {
                 r.hard_state = Some(hs);
             }
             self.hard_state_dirty = false;
@@ -656,6 +723,20 @@ impl Raft {
         if let Some(hs) = ready.hard_state {
             self.persisted_hard_state = hs;
         }
+        // The driver has fsynced these; only now may they count toward a quorum.
+        if let Some(last) = ready.entries.last() {
+            self.persisted = self.persisted.max(last.index);
+        }
+        if let Some(snap) = &ready.snapshot {
+            self.persisted = self.persisted.max(snap.last_index);
+        }
+        if let Some(p) = self.progress.get_mut(&self.id) {
+            p.matched = self.persisted;
+            p.next = self.persisted + 1;
+        }
+        if self.role == Role::Leader {
+            self.maybe_advance_commit();
+        }
         if let Some(last) = ready.committed.last() {
             self.applied = last.index;
         }
@@ -682,12 +763,18 @@ impl Raft {
     pub fn snapshot_at_applied(&self, data: Vec<u8>) -> Option<Snapshot> {
         let index = self.applied;
         let term = self.log.term_at(index)?;
-        Some(Snapshot { last_index: index, last_term: term, config: self.log.config(), data })
+        Some(Snapshot {
+            last_index: index,
+            last_term: term,
+            config: self.log.config(),
+            data,
+        })
     }
 
     /// Discard log entries the snapshot covers.
     pub fn compact(&mut self, snap: &Snapshot) {
-        self.log.compact_through(snap.last_index, snap.last_term, snap.config.clone());
+        self.log
+            .compact_through(snap.last_index, snap.last_term, snap.config.clone());
     }
 
     pub fn should_snapshot(&self) -> bool {
@@ -741,7 +828,13 @@ impl Raft {
                 if peer != self.id {
                     self.pending.messages.push((
                         peer,
-                        Message::new(poll_term, Body::PreVoteReq { last_index, last_term }),
+                        Message::new(
+                            poll_term,
+                            Body::PreVoteReq {
+                                last_index,
+                                last_term,
+                            },
+                        ),
                     ));
                 }
             }
@@ -758,7 +851,13 @@ impl Raft {
             }
             for peer in cfg.all_nodes() {
                 if peer != self.id {
-                    self.send(peer, Body::VoteReq { last_index, last_term });
+                    self.send(
+                        peer,
+                        Body::VoteReq {
+                            last_index,
+                            last_term,
+                        },
+                    );
                 }
             }
         }
@@ -766,15 +865,23 @@ impl Raft {
 
     /// Do the granted votes constitute a quorum?
     fn tally(&self, cfg: &Config) -> bool {
-        let granted: BTreeSet<NodeId> =
-            self.votes.iter().filter(|(_, &g)| g).map(|(id, _)| *id).collect();
+        let granted: BTreeSet<NodeId> = self
+            .votes
+            .iter()
+            .filter(|(_, &g)| g)
+            .map(|(id, _)| *id)
+            .collect();
         cfg.has_quorum(&granted)
     }
 
     /// Has this election already failed beyond recovery?
     fn lost(&self, cfg: &Config) -> bool {
-        let refused: BTreeSet<NodeId> =
-            self.votes.iter().filter(|(_, &g)| !g).map(|(id, _)| *id).collect();
+        let refused: BTreeSet<NodeId> = self
+            .votes
+            .iter()
+            .filter(|(_, &g)| !g)
+            .map(|(id, _)| *id)
+            .collect();
         // If the refusers alone are a quorum, no set of remaining votes can win.
         cfg.has_quorum(&refused)
     }
@@ -794,7 +901,11 @@ impl Raft {
         // safely advance commitIndex over entries from previous terms, and on
         // an idle cluster there may be no client write to serve that purpose.
         let index = self.log.last_index() + 1;
-        let noop = Entry { term: self.term, index, kind: EntryKind::Noop };
+        let noop = Entry {
+            term: self.term,
+            index,
+            kind: EntryKind::Noop,
+        };
         self.append_to_own_log(&[noop]);
         self.broadcast_append();
     }
@@ -808,16 +919,15 @@ impl Raft {
             self.progress.entry(id).or_insert_with(|| {
                 let mut p = Progress::new(next);
                 if id == self.id {
-                    // We trivially have our own log.
-                    p.matched = self.log.last_index();
+                    p.matched = self.persisted;
                     p.state = ProgressState::Replicate;
                 }
                 p
             });
         }
         if let Some(p) = self.progress.get_mut(&self.id) {
-            p.matched = self.log.last_index();
-            p.next = self.log.last_index() + 1;
+            p.matched = self.persisted;
+            p.next = self.persisted + 1;
             p.state = ProgressState::Replicate;
             p.active = true;
         }
@@ -1073,7 +1183,9 @@ impl Raft {
             return;
         }
         let last = self.log.last_index();
-        let Some(p) = self.progress.get_mut(&from) else { return };
+        let Some(p) = self.progress.get_mut(&from) else {
+            return;
+        };
         p.active = true;
 
         if success {
@@ -1086,7 +1198,12 @@ impl Raft {
             }
             self.maybe_advance_commit();
             // Keep streaming if this follower is still behind.
-            if self.progress.get(&from).map(|p| p.matched < last).unwrap_or(false) {
+            if self
+                .progress
+                .get(&from)
+                .map(|p| p.matched < last)
+                .unwrap_or(false)
+            {
                 self.send_append_to(from);
             }
             return;
@@ -1097,7 +1214,9 @@ impl Raft {
             // Find our last entry in a term at or below the follower's
             // conflicting term. If we have that term, we can resume just after
             // our last entry in it.
-            let probe = self.log.find_conflict_by_term(conflict_index, conflict_term);
+            let probe = self
+                .log
+                .find_conflict_by_term(conflict_index, conflict_term);
             probe + 1
         } else {
             conflict_index.max(1)
@@ -1116,7 +1235,13 @@ impl Raft {
 
         if snapshot.last_index <= self.commit {
             // We already have everything it covers.
-            self.send(from, Body::SnapshotResp { success: true, index: self.commit });
+            self.send(
+                from,
+                Body::SnapshotResp {
+                    success: true,
+                    index: self.commit,
+                },
+            );
             return;
         }
         let index = snapshot.last_index;
@@ -1141,16 +1266,28 @@ impl Raft {
         // driver resets the WAL to the snapshot index wholesale. Those retained
         // entries would then exist in memory and not on disk, and the next
         // append would leave a one-entry hole in the durable log.
-        self.dirty_from = if self.log.last_index() > index { Some(index + 1) } else { None };
+        self.dirty_from = if self.log.last_index() > index {
+            Some(index + 1)
+        } else {
+            None
+        };
         self.pending.snapshot = Some(snapshot);
-        self.send(from, Body::SnapshotResp { success: true, index });
+        self.send(
+            from,
+            Body::SnapshotResp {
+                success: true,
+                index,
+            },
+        );
     }
 
     fn handle_snapshot_resp(&mut self, from: NodeId, success: bool, index: Index) {
         if self.role != Role::Leader {
             return;
         }
-        let Some(p) = self.progress.get_mut(&from) else { return };
+        let Some(p) = self.progress.get_mut(&from) else {
+            return;
+        };
         p.active = true;
         if success {
             p.matched = p.matched.max(index);
@@ -1198,7 +1335,10 @@ impl Raft {
             if pending.ctx == ctx || ctx == 0 {
                 pending.acks.insert(from);
                 if cfg.has_quorum(&pending.acks) {
-                    ready.push(ReadState { ctx: pending.ctx, index: pending.index });
+                    ready.push(ReadState {
+                        ctx: pending.ctx,
+                        index: pending.index,
+                    });
                 }
             }
         }
@@ -1217,14 +1357,11 @@ impl Raft {
             self.mark_dirty(first.index);
         }
         self.log.append(entries);
-        if let Some(p) = self.progress.get_mut(&self.id) {
-            p.matched = self.log.last_index();
-            p.next = p.matched + 1;
-        }
-        // A single-voter cluster commits the moment it appends. Without this,
-        // a one-node cluster never makes progress, since nothing else will ever
-        // acknowledge.
-        self.maybe_advance_commit();
+        // Deliberately *not* advancing our own `matched` here: these entries
+        // are in memory, not on the platter. `advance()` promotes them once the
+        // driver has fsynced. A single-voter cluster therefore commits one
+        // durability barrier later than it would otherwise — which is exactly
+        // right, since for a lone voter its own disk *is* the quorum.
     }
 
     fn broadcast_append(&mut self) {
@@ -1236,7 +1373,9 @@ impl Raft {
     }
 
     fn send_append_to(&mut self, peer: NodeId) {
-        let Some(p) = self.progress.get(&peer).cloned() else { return };
+        let Some(p) = self.progress.get(&peer).cloned() else {
+            return;
+        };
         if p.state == ProgressState::Snapshot && p.pending_snapshot > 0 {
             return; // already shipping one
         }
@@ -1271,7 +1410,12 @@ impl Raft {
 
         self.send(
             peer,
-            Body::AppendReq { prev_index, prev_term, entries, commit: self.commit },
+            Body::AppendReq {
+                prev_index,
+                prev_term,
+                entries,
+                commit: self.commit,
+            },
         );
     }
 
@@ -1280,9 +1424,7 @@ impl Raft {
         self.progress
             .iter()
             .filter(|(id, p)| {
-                **id != self.id
-                    && p.state == ProgressState::Snapshot
-                    && p.pending_snapshot == 0
+                **id != self.id && p.state == ProgressState::Snapshot && p.pending_snapshot == 0
             })
             .map(|(id, _)| *id)
             .collect()
@@ -1310,7 +1452,8 @@ impl Raft {
         let cfg = self.log.config();
         let matched = |id: NodeId| {
             if id == self.id {
-                self.log.last_index()
+                // Durable, not merely appended — see `Raft::persisted`.
+                self.persisted
             } else {
                 self.progress.get(&id).map(|p| p.matched).unwrap_or(0)
             }
@@ -1352,6 +1495,8 @@ impl Raft {
     }
 
     fn send(&mut self, to: NodeId, body: Body) {
-        self.pending.messages.push((to, Message::new(self.term, body)));
+        self.pending
+            .messages
+            .push((to, Message::new(self.term, body)));
     }
 }

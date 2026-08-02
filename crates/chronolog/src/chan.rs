@@ -31,7 +31,9 @@ pub struct Chan<T> {
 
 impl<T> Clone for Chan<T> {
     fn clone(&self) -> Self {
-        Chan { inner: Arc::clone(&self.inner) }
+        Chan {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 
@@ -155,7 +157,11 @@ mod tests {
         let woken = Arc::new(AtomicUsize::new(0));
         let mut f = Box::pin(c.recv());
         assert_eq!(poll_once(&mut f, &woken), Poll::Ready(Some(7)));
-        assert_eq!(woken.load(Ordering::SeqCst), 0, "no wake needed when an item is ready");
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            0,
+            "no wake needed when an item is ready"
+        );
     }
 
     #[test]
@@ -166,7 +172,11 @@ mod tests {
         assert_eq!(poll_once(&mut f, &woken), Poll::Pending);
         assert_eq!(woken.load(Ordering::SeqCst), 0);
         c.send(1);
-        assert_eq!(woken.load(Ordering::SeqCst), 1, "the send must wake the parked receiver");
+        assert_eq!(
+            woken.load(Ordering::SeqCst),
+            1,
+            "the send must wake the parked receiver"
+        );
         assert_eq!(poll_once(&mut f, &woken), Poll::Ready(Some(1)));
     }
 

@@ -22,11 +22,22 @@ pub type Value = Option<Vec<u8>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Op {
-    Read { key: Vec<u8> },
-    Write { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Read {
+        key: Vec<u8>,
+    },
+    Write {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
     /// Compare and swap: succeeds only if the current value is `expect`.
-    Cas { key: Vec<u8>, expect: Value, value: Value },
+    Cas {
+        key: Vec<u8>,
+        expect: Value,
+        value: Value,
+    },
 }
 
 impl Op {
@@ -105,7 +116,11 @@ impl fmt::Display for Event {
             Ret::CasFailed => "cas-failed".to_string(),
             Ret::Unknown => "UNKNOWN".to_string(),
         };
-        write!(f, "c{:<3} [{:>12}..{:<12}] {:<32} = {ret}", self.client, self.invoked, self.returned, op)
+        write!(
+            f,
+            "c{:<3} [{:>12}..{:<12}] {:<32} = {ret}",
+            self.client, self.invoked, self.returned, op
+        )
     }
 }
 
@@ -147,7 +162,10 @@ impl History {
         // checker's exploration is reproducible — the same reason the kernel's
         // event heap breaks ties on a sequence number.
         events.sort_by(|a, b| {
-            a.invoked.cmp(&b.invoked).then(a.returned.cmp(&b.returned)).then(a.client.cmp(&b.client))
+            a.invoked
+                .cmp(&b.invoked)
+                .then(a.returned.cmp(&b.returned))
+                .then(a.client.cmp(&b.client))
         });
         History { events }
     }
@@ -204,15 +222,26 @@ mod tests {
     use super::*;
 
     fn ev(client: u64, op: Op, ret: Ret, invoked: u64, returned: u64) -> Event {
-        Event { client, op, ret, invoked, returned }
+        Event {
+            client,
+            op,
+            ret,
+            invoked,
+            returned,
+        }
     }
 
     fn w(k: &str, v: &str) -> Op {
-        Op::Write { key: k.as_bytes().to_vec(), value: v.as_bytes().to_vec() }
+        Op::Write {
+            key: k.as_bytes().to_vec(),
+            value: v.as_bytes().to_vec(),
+        }
     }
 
     fn r(k: &str) -> Op {
-        Op::Read { key: k.as_bytes().to_vec() }
+        Op::Read {
+            key: k.as_bytes().to_vec(),
+        }
     }
 
     #[test]
@@ -222,7 +251,10 @@ mod tests {
         let c = ev(3, r("k"), Ret::Value(None), 20, 30);
         assert!(a.concurrent_with(&b));
         assert!(b.concurrent_with(&a));
-        assert!(!a.concurrent_with(&c), "disjoint windows are not concurrent");
+        assert!(
+            !a.concurrent_with(&c),
+            "disjoint windows are not concurrent"
+        );
     }
 
     #[test]
@@ -259,7 +291,11 @@ mod tests {
         // Identical windows fall back to client id, so the order is stable.
         assert_eq!(s.events()[1].client, 1);
         assert_eq!(s.events()[2].client, 3);
-        assert_eq!(s.events(), h.sorted().events(), "sorting must be deterministic");
+        assert_eq!(
+            s.events(),
+            h.sorted().events(),
+            "sorting must be deterministic"
+        );
     }
 
     #[test]

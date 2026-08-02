@@ -41,13 +41,28 @@ pub enum ReadMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
-    Get { key: Vec<u8>, mode: ReadMode },
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Get {
+        key: Vec<u8>,
+        mode: ReadMode,
+    },
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
     /// Compare and swap. `expect` of `None` means "only if absent".
-    Cas { key: Vec<u8>, expect: Option<Vec<u8>>, value: Option<Vec<u8>> },
+    Cas {
+        key: Vec<u8>,
+        expect: Option<Vec<u8>>,
+        value: Option<Vec<u8>>,
+    },
     /// Read the value at a specific MVCC version.
-    GetAt { key: Vec<u8>, version: Index },
+    GetAt {
+        key: Vec<u8>,
+        version: Index,
+    },
 }
 
 impl Op {
@@ -142,15 +157,24 @@ impl Request {
         let client_id = r.u64()?;
         let seq = r.u64()?;
         let op = match r.u8()? {
-            0 => Op::Get { key: r.bytes()?, mode: tag_mode(r.u8()?)? },
-            1 => Op::Put { key: r.bytes()?, value: r.bytes()? },
+            0 => Op::Get {
+                key: r.bytes()?,
+                mode: tag_mode(r.u8()?)?,
+            },
+            1 => Op::Put {
+                key: r.bytes()?,
+                value: r.bytes()?,
+            },
             2 => Op::Delete { key: r.bytes()? },
             3 => Op::Cas {
                 key: r.bytes()?,
                 expect: r.opt(|r| r.bytes())?,
                 value: r.opt(|r| r.bytes())?,
             },
-            4 => Op::GetAt { key: r.bytes()?, version: r.u64()? },
+            4 => Op::GetAt {
+                key: r.bytes()?,
+                version: r.u64()?,
+            },
             t => return Err(DecodeError::BadTag(t)),
         };
         Ok(Request { client_id, seq, op })
@@ -197,12 +221,20 @@ impl Response {
         let outcome = match r.u8()? {
             0 => Outcome::Value(r.opt(|r| r.bytes())?),
             1 => Outcome::Applied { version: r.u64()? },
-            2 => Outcome::CasFailed { actual: r.opt(|r| r.bytes())? },
-            3 => Outcome::NotLeader { hint: r.opt(|r| r.u32())? },
+            2 => Outcome::CasFailed {
+                actual: r.opt(|r| r.bytes())?,
+            },
+            3 => Outcome::NotLeader {
+                hint: r.opt(|r| r.u32())?,
+            },
             4 => Outcome::Unavailable,
             t => return Err(DecodeError::BadTag(t)),
         };
-        Ok(Response { client_id, seq, outcome })
+        Ok(Response {
+            client_id,
+            seq,
+            outcome,
+        })
     }
 }
 
@@ -215,15 +247,32 @@ mod tests {
             Request {
                 client_id: 1,
                 seq: 1,
-                op: Op::Get { key: b"a".to_vec(), mode: ReadMode::Linearizable },
+                op: Op::Get {
+                    key: b"a".to_vec(),
+                    mode: ReadMode::Linearizable,
+                },
             },
             Request {
                 client_id: 2,
                 seq: 9,
-                op: Op::Get { key: b"a".to_vec(), mode: ReadMode::Lease },
+                op: Op::Get {
+                    key: b"a".to_vec(),
+                    mode: ReadMode::Lease,
+                },
             },
-            Request { client_id: 3, seq: 2, op: Op::Put { key: b"k".to_vec(), value: vec![1; 40] } },
-            Request { client_id: 4, seq: 3, op: Op::Delete { key: b"k".to_vec() } },
+            Request {
+                client_id: 3,
+                seq: 2,
+                op: Op::Put {
+                    key: b"k".to_vec(),
+                    value: vec![1; 40],
+                },
+            },
+            Request {
+                client_id: 4,
+                seq: 3,
+                op: Op::Delete { key: b"k".to_vec() },
+            },
             Request {
                 client_id: 5,
                 seq: 4,
@@ -236,9 +285,20 @@ mod tests {
             Request {
                 client_id: 6,
                 seq: 5,
-                op: Op::Cas { key: b"k".to_vec(), expect: None, value: None },
+                op: Op::Cas {
+                    key: b"k".to_vec(),
+                    expect: None,
+                    value: None,
+                },
             },
-            Request { client_id: 7, seq: 6, op: Op::GetAt { key: b"k".to_vec(), version: 42 } },
+            Request {
+                client_id: 7,
+                seq: 6,
+                op: Op::GetAt {
+                    key: b"k".to_vec(),
+                    version: 42,
+                },
+            },
         ]
     }
 
@@ -255,24 +315,47 @@ mod tests {
             Outcome::Value(Some(vec![1, 2, 3])),
             Outcome::Value(None),
             Outcome::Applied { version: 77 },
-            Outcome::CasFailed { actual: Some(b"other".to_vec()) },
+            Outcome::CasFailed {
+                actual: Some(b"other".to_vec()),
+            },
             Outcome::CasFailed { actual: None },
             Outcome::NotLeader { hint: Some(2) },
             Outcome::NotLeader { hint: None },
             Outcome::Unavailable,
         ];
         for outcome in outcomes {
-            let resp = Response { client_id: 3, seq: 4, outcome };
+            let resp = Response {
+                client_id: 3,
+                seq: 4,
+                outcome,
+            };
             assert_eq!(Response::decode(&resp.encode()).unwrap(), resp);
         }
     }
 
     #[test]
     fn reads_and_writes_are_distinguished() {
-        assert!(Op::Get { key: vec![], mode: ReadMode::Stale }.is_read());
-        assert!(Op::GetAt { key: vec![], version: 1 }.is_read());
-        assert!(!Op::Put { key: vec![], value: vec![] }.is_read());
-        assert!(!Op::Cas { key: vec![], expect: None, value: None }.is_read());
+        assert!(Op::Get {
+            key: vec![],
+            mode: ReadMode::Stale
+        }
+        .is_read());
+        assert!(Op::GetAt {
+            key: vec![],
+            version: 1
+        }
+        .is_read());
+        assert!(!Op::Put {
+            key: vec![],
+            value: vec![]
+        }
+        .is_read());
+        assert!(!Op::Cas {
+            key: vec![],
+            expect: None,
+            value: None
+        }
+        .is_read());
         assert!(!Op::Delete { key: vec![] }.is_read());
     }
 
@@ -414,7 +497,11 @@ impl Client {
     /// makes a retry idempotent rather than a second write.
     pub async fn call(&mut self, op: Op) -> CallResult {
         self.seq += 1;
-        let req = Request { client_id: self.id, seq: self.seq, op };
+        let req = Request {
+            client_id: self.id,
+            seq: self.seq,
+            op,
+        };
         let payload = Wire::Client(req.clone()).encode();
         // Counts only redirects, not timeouts — a timeout has already waited.
         let mut redirects: u32 = 0;
@@ -476,11 +563,19 @@ impl Client {
     }
 
     pub async fn put(&mut self, key: &[u8], value: &[u8]) -> CallResult {
-        self.call(Op::Put { key: key.to_vec(), value: value.to_vec() }).await
+        self.call(Op::Put {
+            key: key.to_vec(),
+            value: value.to_vec(),
+        })
+        .await
     }
 
     pub async fn get(&mut self, key: &[u8], mode: ReadMode) -> CallResult {
-        self.call(Op::Get { key: key.to_vec(), mode }).await
+        self.call(Op::Get {
+            key: key.to_vec(),
+            mode,
+        })
+        .await
     }
 
     pub async fn delete(&mut self, key: &[u8]) -> CallResult {
@@ -493,6 +588,11 @@ impl Client {
         expect: Option<Vec<u8>>,
         value: Option<Vec<u8>>,
     ) -> CallResult {
-        self.call(Op::Cas { key: key.to_vec(), expect, value }).await
+        self.call(Op::Cas {
+            key: key.to_vec(),
+            expect,
+            value,
+        })
+        .await
     }
 }

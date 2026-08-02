@@ -1,7 +1,18 @@
 [package]
 name = "chronolog-server"
+description = "The production Chronolog node: the same code as the simulation, on real hardware."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "chronolog-server"
+path = "src/main.rs"
 
 [dependencies]
+chrono-sim = { workspace = true, features = ["real"] }
+chronolog = { workspace = true }
+clap = { version = "4", features = ["derive"] }

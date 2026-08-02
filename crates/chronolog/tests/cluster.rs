@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono_sim::fault::FaultPolicy;
 use chrono_sim::prelude::*;
-use chronolog::client::{CallResult, Client, Op, Outcome, ReadMode};
+use chronolog::client::{CallResult, Client, Outcome, ReadMode};
 use chronolog::node::{self, NodeOptions};
 use chronolog::raft::RaftOptions;
 use chronolog::types::Config;
@@ -18,6 +18,10 @@ use chronolog::wal::WalOptions;
 
 const SERVERS: u32 = 3;
 const CLIENT_NODE: NodeId = 100;
+
+/// Key/value pairs the cluster acknowledged, which must survive whatever
+/// happens next.
+type Acked = Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>>;
 
 fn options() -> NodeOptions {
     NodeOptions {
@@ -27,7 +31,10 @@ fn options() -> NodeOptions {
             snapshot_interval: 400,
             ..RaftOptions::default()
         },
-        wal: WalOptions { segment_bytes: 32 * 1024, compact_slack_bytes: 8 * 1024 },
+        wal: WalOptions {
+            segment_bytes: 32 * 1024,
+            compact_slack_bytes: 8 * 1024,
+        },
         tick_interval: Nanos::from_millis(20),
         bootstrap: Config::simple(0..SERVERS),
         inspect: false,
@@ -72,7 +79,10 @@ fn a_cluster_elects_a_leader_and_serves_a_write_then_a_read() {
 
     let sim = cluster(1, FaultPolicy::benign(), move |_h, mut client| async move {
         let put = client.put(b"greeting", b"hello").await;
-        assert!(matches!(put, CallResult::Ok(Outcome::Applied { .. })), "put failed: {put:?}");
+        assert!(
+            matches!(put, CallResult::Ok(Outcome::Applied { .. })),
+            "put failed: {put:?}"
+        );
         let read = client.get(b"greeting", ReadMode::Linearizable).await;
         if let CallResult::Ok(outcome) = read {
             *g.lock().unwrap() = Some(outcome);
@@ -81,7 +91,11 @@ fn a_cluster_elects_a_leader_and_serves_a_write_then_a_read() {
     });
 
     sim.run_until(Nanos::from_secs(30));
-    assert_eq!(done.load(Ordering::SeqCst), 1, "the workload never finished");
+    assert_eq!(
+        done.load(Ordering::SeqCst),
+        1,
+        "the workload never finished"
+    );
     assert_eq!(
         got.lock().unwrap().clone(),
         Some(Outcome::Value(Some(b"hello".to_vec()))),
@@ -93,7 +107,7 @@ fn a_cluster_elects_a_leader_and_serves_a_write_then_a_read() {
 fn writes_survive_a_full_cluster_restart() {
     // Durability, end to end: acknowledged writes must come back after every
     // node loses power simultaneously.
-    let acked: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let acked: Acked = Arc::new(Mutex::new(Vec::new()));
     let a = Arc::clone(&acked);
     let sim = cluster(2, FaultPolicy::benign(), move |_h, mut client| async move {
         for i in 0..40u32 {
@@ -106,7 +120,11 @@ fn writes_survive_a_full_cluster_restart() {
     sim.run_until(Nanos::from_secs(60));
 
     let written = acked.lock().unwrap().clone();
-    assert!(written.len() > 30, "expected most writes to be acknowledged, got {}", written.len());
+    assert!(
+        written.len() > 30,
+        "expected most writes to be acknowledged, got {}",
+        written.len()
+    );
 
     // Power-cycle everything.
     for id in 0..SERVERS {
@@ -136,7 +154,10 @@ fn writes_survive_a_full_cluster_restart() {
     sim.run_until(sim.now() + Nanos::from_secs(120));
 
     let results = found.lock().unwrap();
-    assert!(!results.is_empty(), "the cluster never recovered enough to answer a read");
+    assert!(
+        !results.is_empty(),
+        "the cluster never recovered enough to answer a read"
+    );
     for (k, want, got) in results.iter() {
         assert_eq!(
             got.as_deref(),
@@ -164,9 +185,7 @@ fn a_retried_write_is_applied_exactly_once() {
     let sim = cluster(3, policy, move |_h, mut client| async move {
         for i in 0..30u32 {
             let key = format!("k{i}").into_bytes();
-            if let CallResult::Ok(Outcome::Applied { version }) =
-                client.put(&key, b"once").await
-            {
+            if let CallResult::Ok(Outcome::Applied { version }) = client.put(&key, b"once").await {
                 v.lock().unwrap().push(version);
             }
         }
@@ -174,7 +193,11 @@ fn a_retried_write_is_applied_exactly_once() {
     sim.run_until(Nanos::from_secs(90));
 
     let seen = versions.lock().unwrap().clone();
-    assert!(seen.len() > 15, "expected progress despite loss, got {}", seen.len());
+    assert!(
+        seen.len() > 15,
+        "expected progress despite loss, got {}",
+        seen.len()
+    );
     let unique: std::collections::BTreeSet<u64> = seen.iter().copied().collect();
     assert_eq!(
         unique.len(),
@@ -195,19 +218,23 @@ fn the_cluster_makes_progress_under_the_nemesis_policy() {
     let unknown = Arc::new(AtomicU64::new(0));
     let (o, u) = (Arc::clone(&ok), Arc::clone(&unknown));
 
-    let sim = cluster(0x8f3a_2b1c, FaultPolicy::nemesis(), move |_h, mut client| async move {
-        for i in 0..200u32 {
-            let key = format!("k{}", i % 20).into_bytes();
-            match client.put(&key, format!("v{i}").as_bytes()).await {
-                CallResult::Ok(Outcome::Applied { .. }) => {
-                    o.fetch_add(1, Ordering::SeqCst);
-                }
-                _ => {
-                    u.fetch_add(1, Ordering::SeqCst);
+    let sim = cluster(
+        0x8f3a_2b1c,
+        FaultPolicy::nemesis(),
+        move |_h, mut client| async move {
+            for i in 0..200u32 {
+                let key = format!("k{}", i % 20).into_bytes();
+                match client.put(&key, format!("v{i}").as_bytes()).await {
+                    CallResult::Ok(Outcome::Applied { .. }) => {
+                        o.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {
+                        u.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
             }
-        }
-    });
+        },
+    );
     sim.run_until(Nanos::from_secs(30 * 60));
 
     let (succeeded, failed) = (ok.load(Ordering::SeqCst), unknown.load(Ordering::SeqCst));
@@ -222,7 +249,7 @@ fn the_cluster_makes_progress_under_the_nemesis_policy() {
 fn a_rolling_restart_never_loses_an_acknowledged_write() {
     // One node down at a time, forever. A quorum always exists, so every write
     // that is acknowledged must be readable afterwards.
-    let acked: Arc<Mutex<Vec<(Vec<u8>, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let acked: Acked = Arc::new(Mutex::new(Vec::new()));
     let a = Arc::clone(&acked);
     let sim = cluster(5, FaultPolicy::benign(), move |_h, mut client| async move {
         for i in 0..60u32 {
@@ -244,7 +271,11 @@ fn a_rolling_restart_never_loses_an_acknowledged_write() {
     sim.run_until(sim.now() + Nanos::from_secs(120));
 
     let written = acked.lock().unwrap().clone();
-    assert!(written.len() > 40, "expected steady progress, got {}", written.len());
+    assert!(
+        written.len() > 40,
+        "expected steady progress, got {}",
+        written.len()
+    );
 
     let found = Arc::new(Mutex::new(Vec::new()));
     let f = Arc::clone(&found);
@@ -307,7 +338,12 @@ fn a_minority_partition_does_not_stop_the_cluster() {
 fn a_node_that_misses_a_compaction_window_is_caught_up_by_snapshot() {
     let sim = cluster(7, FaultPolicy::benign(), move |_h, mut client| async move {
         for i in 0..900u32 {
-            let _ = client.put(format!("s{}", i % 50).as_bytes(), format!("v{i}").as_bytes()).await;
+            let _ = client
+                .put(
+                    format!("s{}", i % 50).as_bytes(),
+                    format!("v{i}").as_bytes(),
+                )
+                .await;
         }
     });
     // Take a node down long enough for the leader to compact past it.
@@ -326,8 +362,9 @@ fn a_node_that_misses_a_compaction_window_is_caught_up_by_snapshot() {
         .with_max_attempts(20);
     host.spawn_with("stale-read-n2", move |_h| async move {
         for i in 0..50u32 {
-            if let CallResult::Ok(Outcome::Value(v)) =
-                client.get(format!("s{i}").as_bytes(), ReadMode::Stale).await
+            if let CallResult::Ok(Outcome::Value(v)) = client
+                .get(format!("s{i}").as_bytes(), ReadMode::Stale)
+                .await
             {
                 r.lock().unwrap().push((i, v));
             }
@@ -368,13 +405,23 @@ fn the_full_system_is_bit_identical_across_runs_of_a_seed() {
     // rather than a toy workload: Raft, the WAL, the client, and every fault.
     let a = run_for_hash(0x8f3a_2b1c);
     let b = run_for_hash(0x8f3a_2b1c);
-    assert_eq!(a.0, b.0, "trace hashes diverged: chronolog is reading entropy the kernel did not give it");
+    assert_eq!(
+        a.0, b.0,
+        "trace hashes diverged: chronolog is reading entropy the kernel did not give it"
+    );
     assert_eq!(a.1, b.1, "statistics diverged");
     assert_eq!(a.2, b.2, "end times diverged");
-    assert!(a.1.events > 100_000, "the workload should be substantial: {:?}", a.1);
+    assert!(
+        a.1.events > 100_000,
+        "the workload should be substantial: {:?}",
+        a.1
+    );
     // And the run must have been genuinely eventful.
     assert!(a.1.crashes > 0, "nemesis should have crashed something");
-    assert!(a.1.partitions > 0, "nemesis should have partitioned something");
+    assert!(
+        a.1.partitions > 0,
+        "nemesis should have partitioned something"
+    );
 }
 
 #[test]

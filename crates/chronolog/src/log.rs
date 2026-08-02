@@ -49,7 +49,12 @@ impl Log {
     /// silently discards the configuration. The result is a cluster where no
     /// node is a voter and no election ever starts.
     pub fn bootstrap(config: Config) -> Log {
-        Log { snapshot_index: 0, snapshot_term: 0, snapshot_config: config, entries: Vec::new() }
+        Log {
+            snapshot_index: 0,
+            snapshot_term: 0,
+            snapshot_config: config,
+            entries: Vec::new(),
+        }
     }
 
     /// Rebuild from what recovery found on disk.
@@ -73,11 +78,17 @@ impl Log {
     }
 
     pub fn last_index(&self) -> Index {
-        self.entries.last().map(|e| e.index).unwrap_or(self.snapshot_index)
+        self.entries
+            .last()
+            .map(|e| e.index)
+            .unwrap_or(self.snapshot_index)
     }
 
     pub fn last_term(&self) -> Term {
-        self.entries.last().map(|e| e.term).unwrap_or(self.snapshot_term)
+        self.entries
+            .last()
+            .map(|e| e.term)
+            .unwrap_or(self.snapshot_term)
     }
 
     pub fn snapshot_index(&self) -> Index {
@@ -296,7 +307,11 @@ mod tests {
     use crate::types::EntryKind;
 
     fn e(term: Term, index: Index) -> Entry {
-        Entry { term, index, kind: EntryKind::Normal(vec![index as u8]) }
+        Entry {
+            term,
+            index,
+            kind: EntryKind::Normal(vec![index as u8]),
+        }
     }
 
     fn log_with(entries: &[(Term, Index)]) -> Log {
@@ -344,7 +359,15 @@ mod tests {
     fn merge_keeps_matching_entries_and_replaces_only_the_conflict() {
         let mut l = log_with(&[(1, 1), (1, 2), (1, 3), (1, 4)]);
         // A leader in term 2 says 3 and 4 should be term 2.
-        let incoming = vec![e(1, 2), e(1, 3), Entry { term: 2, index: 4, ..e(1, 4) }];
+        let incoming = vec![
+            e(1, 2),
+            e(1, 3),
+            Entry {
+                term: 2,
+                index: 4,
+                ..e(1, 4)
+            },
+        ];
         let last = l.merge(1, &incoming);
         assert_eq!(last, 4);
         assert_eq!(l.term_at(2), Some(1));
@@ -362,7 +385,11 @@ mod tests {
         let stale = vec![e(1, 2), e(1, 3)];
         let last = l.merge(1, &stale);
         assert_eq!(last, 3);
-        assert_eq!(l.last_index(), 5, "entries 4 and 5 must survive a stale duplicate");
+        assert_eq!(
+            l.last_index(),
+            5,
+            "entries 4 and 5 must survive a stale duplicate"
+        );
     }
 
     #[test]
@@ -379,7 +406,11 @@ mod tests {
         let mut l = log_with(&[(1, 1), (1, 2), (2, 3), (2, 4), (3, 5)]);
         l.compact_through(3, 2, Config::simple([0, 1, 2]));
         assert_eq!(l.snapshot_index(), 3);
-        assert_eq!(l.term_at(3), Some(2), "the boundary term must survive compaction");
+        assert_eq!(
+            l.term_at(3),
+            Some(2),
+            "the boundary term must survive compaction"
+        );
         assert_eq!(l.term_at(2), None, "compacted entries are gone");
         assert_eq!(l.first_index(), 4);
         assert_eq!(l.last_index(), 5);
@@ -396,7 +427,11 @@ mod tests {
             data: vec![],
         };
         l.install_snapshot(&snap);
-        assert_eq!(l.last_index(), 5, "entries past the snapshot must not be discarded");
+        assert_eq!(
+            l.last_index(),
+            5,
+            "entries past the snapshot must not be discarded"
+        );
         assert_eq!(l.snapshot_index(), 3);
     }
 
@@ -473,7 +508,11 @@ mod tests {
         }]);
         assert!(l.config().is_joint());
         l.truncate_from(1);
-        assert_eq!(l.config(), Config::simple([0, 1, 2]), "truncation must undo the change");
+        assert_eq!(
+            l.config(),
+            Config::simple([0, 1, 2]),
+            "truncation must undo the change"
+        );
     }
 
     #[test]

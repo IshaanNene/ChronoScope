@@ -44,7 +44,11 @@ fn a_simulated_day_costs_no_wall_clock() {
 
     assert_eq!(woke.load(Ordering::SeqCst), 24);
     assert_eq!(sim.now(), Nanos::from_secs(24 * 3600));
-    assert_eq!(outcome, Outcome::Quiesced, "nothing left to do once the sleeper finishes");
+    assert_eq!(
+        outcome,
+        Outcome::Quiesced,
+        "nothing left to do once the sleeper finishes"
+    );
     assert!(
         elapsed.as_millis() < 500,
         "24 simulated hours took {elapsed:?} of real time; virtual time is not jumping"
@@ -75,7 +79,10 @@ fn time_only_advances_when_nothing_is_runnable() {
 
     let seen = observed.lock().unwrap();
     assert_eq!(seen.len(), 20);
-    assert!(seen.iter().all(|&t| t == Nanos::ZERO), "yielding must not advance virtual time");
+    assert!(
+        seen.iter().all(|&t| t == Nanos::ZERO),
+        "yielding must not advance virtual time"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +99,8 @@ fn busy_cluster(sim: &Sim) {
         host.spawn("chatter", async move {
             let mut n = 0u64;
             loop {
-                h.sleep(Nanos::from_millis(20 + (h.rng.next_u64() % 30))).await;
+                h.sleep(Nanos::from_millis(20 + (h.rng.next_u64() % 30)))
+                    .await;
                 for &p in &peers {
                     h.net.send(p, format!("ping {} {}", h.node, n).into_bytes());
                 }
@@ -149,7 +157,10 @@ fn the_same_seed_produces_a_bit_identical_run() {
     assert_eq!(h1, h2, "trace hashes diverged for identical seeds");
     assert_eq!(s1, s2, "statistics diverged for identical seeds");
     assert_eq!(t1, t2);
-    assert!(s1.events > 10_000, "workload must be substantial to be worth checking: {s1:?}");
+    assert!(
+        s1.events > 10_000,
+        "workload must be substantial to be worth checking: {s1:?}"
+    );
 }
 
 #[test]
@@ -235,8 +246,14 @@ fn messages_arrive_after_link_latency() {
 
     let at = arrival.lock().unwrap().expect("message never arrived");
     // Sent at 10ms; `benign` latency is 100-400us.
-    assert!(at > Nanos::from_millis(10), "arrived at {at}, before it was sent");
-    assert!(at < Nanos::from_millis(11), "arrived at {at}, later than the link allows");
+    assert!(
+        at > Nanos::from_millis(10),
+        "arrived at {at}, before it was sent"
+    );
+    assert!(
+        at < Nanos::from_millis(11),
+        "arrived at {at}, later than the link allows"
+    );
 }
 
 #[test]
@@ -269,7 +286,10 @@ fn a_partition_blocks_traffic_and_a_heal_restores_it() {
 
     sim.run_until(Nanos::from_millis(300));
     let before = got.load(Ordering::SeqCst);
-    assert!(before > 20, "expected steady traffic before the partition, got {before}");
+    assert!(
+        before > 20,
+        "expected steady traffic before the partition, got {before}"
+    );
 
     sim.partition(&[0], &[1], false);
     sim.run_until(Nanos::from_millis(700));
@@ -280,7 +300,10 @@ fn a_partition_blocks_traffic_and_a_heal_restores_it() {
     sim.heal_all();
     sim.run_until(Nanos::from_millis(1100));
     let after = got.load(Ordering::SeqCst) - before - during;
-    assert!(after > 20, "expected traffic to resume after the heal, got {after}");
+    assert!(
+        after > 20,
+        "expected traffic to resume after the heal, got {after}"
+    );
 }
 
 #[test]
@@ -325,15 +348,29 @@ fn packets_are_dropped_duplicated_and_reordered() {
 
     let got = seen.lock().unwrap().clone();
     let stats = sim.stats();
-    assert!(stats.msgs_dropped > 20, "expected drops, got {}", stats.msgs_dropped);
-    assert!(stats.msgs_duplicated > 20, "expected duplicates, got {}", stats.msgs_duplicated);
+    assert!(
+        stats.msgs_dropped > 20,
+        "expected drops, got {}",
+        stats.msgs_dropped
+    );
+    assert!(
+        stats.msgs_duplicated > 20,
+        "expected duplicates, got {}",
+        stats.msgs_duplicated
+    );
 
     let mut sorted = got.clone();
     sorted.sort_unstable();
-    assert_ne!(got, sorted, "expected reordering; delivery order matched send order exactly");
+    assert_ne!(
+        got, sorted,
+        "expected reordering; delivery order matched send order exactly"
+    );
 
     let unique: std::collections::BTreeSet<u64> = got.iter().copied().collect();
-    assert!(got.len() > unique.len(), "expected at least one duplicate to be delivered");
+    assert!(
+        got.len() > unique.len(),
+        "expected at least one duplicate to be delivered"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +380,10 @@ fn packets_are_dropped_duplicated_and_reordered() {
 /// Writes `n` records, fsyncing after each of the first `synced`, then hard
 /// crashes. Returns what survived on the platter.
 fn crash_after_writes(seed: u64, records: usize, synced: usize, disk: DiskPolicy) -> Vec<u8> {
-    let policy = FaultPolicy { disk, ..FaultPolicy::benign() };
+    let policy = FaultPolicy {
+        disk,
+        ..FaultPolicy::benign()
+    };
     let sim = Sim::new(seed, policy, TraceMode::HashOnly);
     let done = Arc::new(AtomicU64::new(0));
     let d = Arc::clone(&done);
@@ -352,7 +392,9 @@ fn crash_after_writes(seed: u64, records: usize, synced: usize, disk: DiskPolicy
         // Only write on the first boot; after the restart we just read back.
         let first = d.load(Ordering::SeqCst) == 0;
         host.spawn_with("writer", |h| async move {
-            let Ok(f) = h.storage.open("data").await else { return };
+            let Ok(f) = h.storage.open("data").await else {
+                return;
+            };
             if !first {
                 return;
             }
@@ -382,7 +424,9 @@ fn crash_after_writes(seed: u64, records: usize, synced: usize, disk: DiskPolicy
     let c = Arc::clone(&contents);
     let host = sim.host(0);
     host.spawn_with("reader", |h| async move {
-        let Ok(f) = h.storage.open("data").await else { return };
+        let Ok(f) = h.storage.open("data").await else {
+            return;
+        };
         let len = f.len() as usize;
         if let Ok(b) = f.read_at(0, len).await {
             *c.lock().unwrap() = b;
@@ -395,10 +439,18 @@ fn crash_after_writes(seed: u64, records: usize, synced: usize, disk: DiskPolicy
 
 #[test]
 fn fsynced_data_survives_a_crash() {
-    let disk = DiskPolicy { torn_write_ppm: 0, lost_write_ppm: 1_000_000, ..DiskPolicy::default() };
+    let disk = DiskPolicy {
+        torn_write_ppm: 0,
+        lost_write_ppm: 1_000_000,
+        ..DiskPolicy::default()
+    };
     // Every un-fsynced write is lost, every fsynced one must survive.
     let survived = crash_after_writes(11, 10, 6, disk);
-    assert!(survived.len() >= 600, "fsynced prefix vanished: {} bytes left", survived.len());
+    assert!(
+        survived.len() >= 600,
+        "fsynced prefix vanished: {} bytes left",
+        survived.len()
+    );
     for i in 0..6 {
         assert_eq!(
             survived[i * 100],
@@ -410,7 +462,11 @@ fn fsynced_data_survives_a_crash() {
 
 #[test]
 fn un_fsynced_data_can_vanish_on_power_loss() {
-    let disk = DiskPolicy { torn_write_ppm: 0, lost_write_ppm: 1_000_000, ..DiskPolicy::default() };
+    let disk = DiskPolicy {
+        torn_write_ppm: 0,
+        lost_write_ppm: 1_000_000,
+        ..DiskPolicy::default()
+    };
     let survived = crash_after_writes(12, 10, 6, disk);
     assert_eq!(
         survived.len(),
@@ -430,8 +486,14 @@ fn writes_tear_at_sector_granularity() {
     };
     let mut saw_torn = false;
     for seed in 0..25u64 {
-        let sim = Sim::new(seed, FaultPolicy { disk: disk.clone(), ..FaultPolicy::benign() },
-            TraceMode::HashOnly);
+        let sim = Sim::new(
+            seed,
+            FaultPolicy {
+                disk: disk.clone(),
+                ..FaultPolicy::benign()
+            },
+            TraceMode::HashOnly,
+        );
         let done = Arc::new(AtomicU64::new(0));
         let d = Arc::clone(&done);
         sim.set_boot(move |host: Host| {
@@ -440,7 +502,9 @@ fn writes_tear_at_sector_granularity() {
                 return;
             }
             host.spawn_with("writer", |h| async move {
-                let Ok(f) = h.storage.open("data").await else { return };
+                let Ok(f) = h.storage.open("data").await else {
+                    return;
+                };
                 // One 4 KiB write spanning eight 512-byte sectors, never fsynced.
                 let _ = f.write_at(0, vec![0xAB; 4096]).await;
                 d.store(1, Ordering::SeqCst);
@@ -454,7 +518,6 @@ fn writes_tear_at_sector_granularity() {
         let stats = sim.stats();
         if stats.torn_writes > 0 {
             saw_torn = true;
-            let mut torn_len = None;
             sim.with_trace(|_| {});
             // Read back what landed.
             sim.restart(0);
@@ -462,7 +525,9 @@ fn writes_tear_at_sector_granularity() {
             let g = Arc::clone(&got);
             let host = sim.host(0);
             host.spawn_with("reader", |h| async move {
-                let Ok(f) = h.storage.open("data").await else { return };
+                let Ok(f) = h.storage.open("data").await else {
+                    return;
+                };
                 let n = f.len() as usize;
                 if let Ok(b) = f.read_at(0, n).await {
                     *g.lock().unwrap() = b;
@@ -470,28 +535,48 @@ fn writes_tear_at_sector_granularity() {
             });
             sim.run_until(Nanos::from_secs(5));
             let bytes = got.lock().unwrap().clone();
-            torn_len = Some(bytes.len());
-            let n = torn_len.unwrap();
+            let n = bytes.len();
             assert!(n < 4096, "a torn write must not land whole, got {n}");
-            assert_eq!(n % 512, 0, "a torn write must land on a sector boundary, got {n}");
-            assert!(bytes.iter().all(|&b| b == 0xAB), "surviving bytes must be the written bytes");
+            assert_eq!(
+                n % 512,
+                0,
+                "a torn write must land on a sector boundary, got {n}"
+            );
+            assert!(
+                bytes.iter().all(|&b| b == 0xAB),
+                "surviving bytes must be the written bytes"
+            );
         }
     }
-    assert!(saw_torn, "25 seeds at 100% tear rate produced no torn write");
+    assert!(
+        saw_torn,
+        "25 seeds at 100% tear rate produced no torn write"
+    );
 }
 
 #[test]
 fn enospc_is_returned_not_panicked() {
-    let disk = DiskPolicy { enospc_after_bytes: Some(1024), ..DiskPolicy::default() };
-    let sim =
-        Sim::new(13, FaultPolicy { disk, ..FaultPolicy::benign() }, TraceMode::HashOnly);
+    let disk = DiskPolicy {
+        enospc_after_bytes: Some(1024),
+        ..DiskPolicy::default()
+    };
+    let sim = Sim::new(
+        13,
+        FaultPolicy {
+            disk,
+            ..FaultPolicy::benign()
+        },
+        TraceMode::HashOnly,
+    );
     let written = Arc::new(AtomicU64::new(0));
     let failed = Arc::new(AtomicU64::new(0));
     let (w, fl) = (Arc::clone(&written), Arc::clone(&failed));
     sim.set_boot(move |host: Host| {
         let (w, fl) = (Arc::clone(&w), Arc::clone(&fl));
         host.spawn_with("writer", |h| async move {
-            let Ok(f) = h.storage.open("data").await else { return };
+            let Ok(f) = h.storage.open("data").await else {
+                return;
+            };
             for i in 0..100u64 {
                 match f.write_at(i * 100, vec![1u8; 100]).await {
                     Ok(()) => {
@@ -508,7 +593,11 @@ fn enospc_is_returned_not_panicked() {
     sim.add_node(0, Role::Server);
     sim.boot_all();
     sim.run_until(Nanos::from_secs(10));
-    assert_eq!(written.load(Ordering::SeqCst), 10, "1024-byte quota fits ten 100-byte writes");
+    assert_eq!(
+        written.load(Ordering::SeqCst),
+        10,
+        "1024-byte quota fits ten 100-byte writes"
+    );
     assert_eq!(failed.load(Ordering::SeqCst), 90);
 }
 
@@ -542,12 +631,23 @@ fn a_crash_reaps_tasks_and_a_restart_reruns_boot() {
 
     sim.crash(0);
     sim.run_until(Nanos::from_millis(500));
-    assert_eq!(ticks.load(Ordering::SeqCst), before, "a crashed node's tasks must not run");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        before,
+        "a crashed node's tasks must not run"
+    );
 
     sim.restart(0);
     sim.run_until(Nanos::from_millis(700));
-    assert_eq!(boots.load(Ordering::SeqCst), 2, "restart must re-enter the boot function");
-    assert!(ticks.load(Ordering::SeqCst) > before, "the restarted node must make progress");
+    assert_eq!(
+        boots.load(Ordering::SeqCst),
+        2,
+        "restart must re-enter the boot function"
+    );
+    assert!(
+        ticks.load(Ordering::SeqCst) > before,
+        "the restarted node must make progress"
+    );
 }
 
 #[test]
@@ -586,12 +686,19 @@ fn a_paused_node_freezes_but_its_clock_does_not() {
     // than its 10ms tick interval — that gap is the pause.
     let mut worst = Nanos::ZERO;
     for node in 0..3u32 {
-        let times: Vec<Nanos> = seen.iter().filter(|(n, _)| *n == node).map(|(_, t)| *t).collect();
+        let times: Vec<Nanos> = seen
+            .iter()
+            .filter(|(n, _)| *n == node)
+            .map(|(_, t)| *t)
+            .collect();
         for w in times.windows(2) {
             worst = worst.max(w[1] - w[0]);
         }
     }
-    assert!(worst > Nanos::from_millis(100), "no pause-shaped gap in the tick stream: {worst}");
+    assert!(
+        worst > Nanos::from_millis(100),
+        "no pause-shaped gap in the tick stream: {worst}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -627,11 +734,17 @@ fn nodes_disagree_about_what_time_it_is() {
     let walls: Vec<Nanos> = hosts.iter().map(|h| h.now()).collect();
     let monos: Vec<Nanos> = hosts.iter().map(|h| h.monotonic()).collect();
     let spread = walls.iter().max().unwrap().0 - walls.iter().min().unwrap().0;
-    assert!(spread > 1_000_000, "wall clocks agreed to within {spread}ns; skew is not applied");
+    assert!(
+        spread > 1_000_000,
+        "wall clocks agreed to within {spread}ns; skew is not applied"
+    );
 
     // Monotonic clocks drift but never carry the skew offset.
     let mono_spread = monos.iter().max().unwrap().0 - monos.iter().min().unwrap().0;
-    assert!(mono_spread > 0, "drift should separate monotonic clocks over 60s");
+    assert!(
+        mono_spread > 0,
+        "drift should separate monotonic clocks over 60s"
+    );
 }
 
 #[test]
@@ -706,7 +819,11 @@ fn task_interleaving_varies_with_the_seed() {
     let a = order_for(100);
     let b = order_for(200);
     assert_eq!(a.len(), 32);
-    assert_eq!(a, order_for(100), "the same seed must produce the same interleaving");
+    assert_eq!(
+        a,
+        order_for(100),
+        "the same seed must produce the same interleaving"
+    );
     assert_ne!(a, b, "different seeds must explore different interleavings");
 }
 
@@ -729,7 +846,10 @@ fn a_panicking_task_is_reported_not_propagated() {
     match outcome {
         Outcome::Panicked { node, message } => {
             assert_eq!(node, 0);
-            assert!(message.contains("Leader Completeness"), "lost the message: {message}");
+            assert!(
+                message.contains("Leader Completeness"),
+                "lost the message: {message}"
+            );
         }
         other => panic!("expected a reported panic, got {other:?}"),
     }
