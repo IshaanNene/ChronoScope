@@ -245,7 +245,17 @@ cargo test -- --ignored             # the open bug, CS-009
 
 ## Status
 
-Layers 1–3 and the swarm are complete and green. The production runtime
-(`io_uring` storage, Prometheus, `/debug`) and the deployment manifests are
-scaffolded; see [`task.md`](task.md) for the running build log, including the
-decisions and the dead ends.
+Layers 1–5 are built and green: the deterministic core, Chronolog, the three
+oracles, the swarm, and a production binary verified on real sockets and real
+`fsync`.
+
+- [`BUGS.md`](BUGS.md) — the bug ledger, and the point of the project
+- [`ROADMAP.md`](ROADMAP.md) — what is still missing, audited against the spec
+  and ranked by whether it would find more bugs
+- [`task.md`](task.md) — the running build log, including the decisions and the
+  dead ends
+
+The largest known gap is that the swarm never proposes a **membership change**,
+so joint consensus — the part of Raft most likely to be subtly wrong — is
+exercised only by hand-written tests and never by a random schedule. That is
+P0.1 in the roadmap, and it is where the next bugs almost certainly are.

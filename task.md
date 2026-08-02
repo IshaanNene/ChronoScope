@@ -69,6 +69,19 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] Helm chart
 - [x] Terraform (namespace, PDB, odd-replica validation)
 
+## Known gaps
+
+Audited against the spec in [`ROADMAP.md`](ROADMAP.md). The three that matter:
+
+- [ ] **The swarm never proposes a membership change** — joint consensus is
+      exercised by hand-written tests only, never by a random schedule. The
+      spec predicts this is where hand-rolled Raft is wrong; it has not had the
+      chance to prove it.
+- [ ] `corrupt_ppm` and `enospc_after_bytes` are modelled and set to zero in
+      every preset, so two fault paths are never exercised in a live run.
+- [ ] CS-009 open; the Helm chart has no templates; throughput is 7.4k/sec
+      against a 50k–150k target.
+
 ## Evidence
 
 - [x] `BUGS.md` — bug ledger, each entry with a reproducing seed
