@@ -397,6 +397,11 @@ impl Raft {
         self.applied
     }
 
+    /// Highest index this node has made durable and told the cluster about.
+    pub fn persisted_index(&self) -> Index {
+        self.persisted
+    }
+
     pub fn last_index(&self) -> Index {
         self.log.last_index()
     }
@@ -524,6 +529,31 @@ impl Raft {
         self.reset_progress_for_config();
         self.broadcast_append();
         Some(index)
+    }
+
+    /// Report what the durable log actually reaches, after a successful sync.
+    ///
+    /// The driver is the only thing that knows this, and it has to be the one
+    /// to say it. Inferring durability from what Raft *asked* to be written is
+    /// a guess that happens to be right most of the time: it misses every case
+    /// where the write path did something other than exactly what was
+    /// requested — a rollback, a partial batch, a repair. A node's vote in its
+    /// own quorum has to be backed by its disk, so it has to come from the
+    /// disk.
+    pub fn set_persisted(&mut self, index: Index) {
+        // Assign, do not raise.
+        //
+        // Taking a `max` looks obviously right — durability only grows — and is
+        // wrong, because a conflicting `AppendEntries` truncates the durable log
+        // too. The entry was genuinely fsynced and then genuinely removed; a
+        // high-water mark cannot express that, so it keeps claiming an index the
+        // disk no longer holds.
+        //
+        // This is the same mistake as counting an un-fsynced tail toward a
+        // quorum, one step later: the node goes on offering an index it cannot
+        // back, and if it is ever elected it leads on a log shorter than it
+        // advertised. The WAL knows exactly what survived. Believe it.
+        self.persisted = index.min(self.log.last_index());
     }
 
     /// Stand down to follower at the current term.
@@ -724,6 +754,12 @@ impl Raft {
             self.applied
         );
         self.commit = self.commit.min(self.log.last_index());
+        // `persisted` means "durable *and still ours*". A conflicting
+        // `AppendEntries` can truncate an entry that was genuinely fsynced, and
+        // leaving the high-water mark above the log would claim durability for
+        // something deliberately discarded — which reads, to anyone checking,
+        // exactly like losing acknowledged data.
+        self.persisted = self.persisted.min(self.log.last_index());
         if self.commit > self.applied {
             r.committed = self.log.slice(self.applied + 1, self.commit + 1).to_vec();
         }
@@ -734,13 +770,6 @@ impl Raft {
     pub fn advance(&mut self, ready: &Ready) {
         if let Some(hs) = ready.hard_state {
             self.persisted_hard_state = hs;
-        }
-        // The driver has fsynced these; only now may they count toward a quorum.
-        if let Some(last) = ready.entries.last() {
-            self.persisted = self.persisted.max(last.index);
-        }
-        if let Some(snap) = &ready.snapshot {
-            self.persisted = self.persisted.max(snap.last_index);
         }
         if let Some(p) = self.progress.get_mut(&self.id) {
             p.matched = self.persisted;

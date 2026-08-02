@@ -117,6 +117,8 @@ struct Segment {
     /// Byte offset of entry `first_index + i`. Kept in memory so a read is one
     /// seek rather than a scan.
     offsets: Vec<u64>,
+    /// Written to since the last `sync`, and therefore not yet durable.
+    dirty: bool,
 }
 
 impl Segment {
@@ -160,8 +162,6 @@ pub struct Wal {
     /// Which snapshot slot to write next.
     snapshot_slot: u8,
     snapshot_seq: u64,
-    /// Segments touched since the last `sync`.
-    dirty: bool,
     stats: WalStats,
 }
 
@@ -240,6 +240,7 @@ impl Wal {
                 last_index: first_index.saturating_sub(1),
                 size: 0,
                 offsets: Vec::new(),
+                dirty: false,
             };
 
             // Once the tail is broken, every later segment is unreachable —
@@ -307,7 +308,6 @@ impl Wal {
             state_seq,
             snapshot_slot,
             snapshot_seq,
-            dirty: false,
             stats: WalStats::default(),
         };
         if wal.segments.is_empty() {
@@ -358,6 +358,7 @@ impl Wal {
             last_index: first_index.saturating_sub(1),
             size: 0,
             offsets: Vec::new(),
+            dirty: false,
         });
         // A freshly created file is a directory-entry change. Without syncing
         // the directory it can vanish on power loss even though its contents
@@ -431,6 +432,7 @@ impl Wal {
                 .segments
                 .last_mut()
                 .expect("always at least one segment");
+            seg.dirty = true;
             let at = seg.size;
             seg.file.write_at(at, record.clone()).await?;
             seg.offsets.push(at);
@@ -438,21 +440,50 @@ impl Wal {
             seg.last_index = entry.index;
             self.stats.entries_written += 1;
             self.stats.bytes_written += record.len() as u64;
-            self.dirty = true;
         }
         Ok(())
     }
 
     /// The durability barrier. Until this resolves, nothing appended is safe.
     pub async fn sync(&mut self) -> std::io::Result<()> {
-        if !self.dirty {
-            return Ok(());
-        }
-        if let Some(seg) = self.segments.last() {
+        // There is deliberately no global "is anything dirty" shortcut.
+        //
+        // A second flag alongside the per-segment ones is a second source of
+        // truth, and the two drift: `truncate_from` and `reset_to` both fsync
+        // one segment and clear the global flag, so a later `sync` short-circuits
+        // while another segment still holds unsynced writes. The loss is one or
+        // two entries at the tail — small enough to look like an ordinary torn
+        // write, and not one, because the caller was told they were durable.
+        //
+        // Scanning a handful of segments costs nothing and cannot disagree with
+        // itself.
+        let mut synced = false;
+        // Every segment written since the last barrier, not just the active
+        // one.
+        //
+        // A batch that crosses a rollover writes into two files. Syncing only
+        // the newest leaves the earlier one's tail in the page cache while the
+        // caller is told the whole batch is durable — so the node acknowledges
+        // those entries to its leader, they count toward a quorum, and a crash
+        // makes them vanish.
+        //
+        // Recovery then finds a one-entry hole at the segment boundary, stops
+        // there, and discards every later segment. The node comes back hundreds
+        // of entries short, votes for a candidate that never had them, and the
+        // new leader truncates them off a peer that did. The symptom surfaces
+        // thousands of events later as two replicas with divergent applied
+        // histories, with nothing pointing back here.
+        //
+        // `fsync` is the only promise this system makes. It has to cover
+        // everything it claims to.
+        for seg in self.segments.iter_mut().filter(|s| s.dirty) {
             seg.file.fsync().await?;
+            seg.dirty = false;
+            synced = true;
         }
-        self.stats.fsyncs += 1;
-        self.dirty = false;
+        if synced {
+            self.stats.fsyncs += 1;
+        }
         Ok(())
     }
 
@@ -548,8 +579,8 @@ impl Wal {
                     seg.first_index + keep as u64 - 1
                 };
                 seg.file.fsync().await?;
+                seg.dirty = false;
                 self.stats.fsyncs += 1;
-                self.dirty = false;
             }
         }
         Ok(())
@@ -574,7 +605,6 @@ impl Wal {
             self.host.storage.remove(&seg.name).await?;
             self.stats.segments_deleted += 1;
         }
-        self.dirty = false;
         self.open_segment(index + 1).await?;
         Ok(())
     }

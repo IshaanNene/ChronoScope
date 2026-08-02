@@ -615,6 +615,64 @@ fn a_retry_after_a_failed_append_succeeds_once_space_is_free() {
     );
 }
 
+#[test]
+fn a_synced_batch_that_crosses_a_segment_boundary_survives_a_crash() {
+    // Regression for the durability bug behind CS-009.
+    //
+    // A batch written across a rollover lands in two files. Syncing only the
+    // active one leaves the earlier segment's tail in the page cache while the
+    // caller has been told the whole batch is durable.
+    //
+    // Every un-fsynced write is lost here, so anything the barrier missed
+    // disappears and the assertion below fails.
+    let disk = DiskPolicy {
+        torn_write_ppm: 0,
+        lost_write_ppm: 1_000_000,
+        slow_ppm: 0,
+        ..DiskPolicy::default()
+    };
+    // Small segments so a single batch is guaranteed to span several.
+    let opts = WalOptions {
+        segment_bytes: 512,
+        compact_slack_bytes: 0,
+    };
+    let (sim, host) = sim_with(41, disk);
+    let written: Vec<Entry> = (1..=200).map(|i| cmd(1, i)).collect();
+
+    let (w, o) = (written.clone(), opts.clone());
+    let segs = block_on(&sim, &host, move |h| async move {
+        let mut wal = Wal::open(h, o).await.unwrap().wal;
+        // One append call, many segments, one barrier.
+        wal.append(&w).await.unwrap();
+        wal.sync().await.unwrap();
+        wal.segment_count()
+    });
+    assert!(segs > 3, "the batch must span several segments, got {segs}");
+
+    sim.crash(0);
+    sim.restart(0);
+    let host = sim.host(0);
+    let o = opts.clone();
+    let rec = block_on(&sim, &host, move |h| async move {
+        let r = Wal::open(h, o).await.unwrap();
+        (r.entries, r.tail)
+    });
+
+    assert_eq!(
+        rec.1,
+        TailReason::Clean,
+        "a fully synced log must recover cleanly"
+    );
+    assert_eq!(
+        rec.0.len(),
+        written.len(),
+        "the barrier must cover every segment the batch touched: recovered {} of {}",
+        rec.0.len(),
+        written.len()
+    );
+    assert_eq!(rec.0, written);
+}
+
 // ---------------------------------------------------------------------------
 // The property, under randomised crashes
 // ---------------------------------------------------------------------------

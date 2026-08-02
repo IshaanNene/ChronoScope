@@ -81,6 +81,9 @@ pub struct Invariants {
     /// (index, term) pairs that some node has committed, so a later leader
     /// overwriting one is detectable. Leader Completeness.
     committed_terms: BTreeMap<Index, Term>,
+    /// `(node, generation)` -> the highest index it claimed to have fsynced.
+    /// Checked against what the *next* generation recovers.
+    persisted: BTreeMap<(NodeId, u64), Index>,
     violations: Vec<Violated>,
     checks: u64,
 }
@@ -131,12 +134,65 @@ impl Invariants {
     pub fn check(&mut self, view: &ClusterView) {
         self.checks += 1;
         self.driver_alive(view);
+        self.durability(view);
         self.election_safety(view);
         self.monotonicity(view);
         self.log_matching(view);
         self.state_machine_safety(view);
         self.leader_completeness(view);
         self.commit_is_backed_by_a_log(view);
+    }
+
+    /// **Durability**: a restart must recover everything that was both fsynced
+    /// *and* committed.
+    ///
+    /// The obvious version — "recover everything fsynced" — is not sound, and
+    /// the difference matters. A durable entry can be legitimately truncated by
+    /// a new leader whose log diverges there, so a node can lose an fsynced
+    /// entry entirely correctly. Committed entries are the ones that can never
+    /// be truncated (that is Leader Completeness), so the durable *and*
+    /// committed prefix is exactly the part a restart must bring back.
+    ///
+    /// This is the contract every other safety property rests on. A node
+    /// acknowledges an entry only once it is on stable storage, and the leader
+    /// counts that acknowledgement toward a quorum. If the node can come back
+    /// with less, then "committed" meant nothing, and a later election can
+    /// legitimately choose a leader that never had the entry — which presents,
+    /// thousands of events later, as a committed entry being overwritten.
+    ///
+    /// Checking it directly turns that long causal chain into one line naming
+    /// the node and the two indices.
+    fn durability(&mut self, view: &ClusterView) {
+        for (id, s) in &view.nodes {
+            // A handle that has not published yet still holds its zeroed
+            // defaults; reading those makes every restart look like total loss.
+            if !s.recovered {
+                continue;
+            }
+            if s.generation > 0 {
+                let prev = (*id, s.generation - 1);
+                if let Some(&was) = self.persisted.get(&prev) {
+                    // Only meaningful once the node has finished recovering;
+                    // a snapshot may legitimately cover the entries instead.
+                    if s.last_index < was && s.snapshot_index < was {
+                        self.fail(
+                            "DURABILITY",
+                            format!(
+                                "n{id} had committed data durable through {was} before \
+                                 restarting but came back with last={} (snapshot {}) — \
+                                 acknowledged data was lost",
+                                s.last_index, s.snapshot_index
+                            ),
+                        );
+                    }
+                }
+            }
+            let key = (*id, s.generation);
+            let high = self.persisted.get(&key).copied().unwrap_or(0);
+            // Durable on this node *and* committed cluster-wide.
+            let safe = s.persisted_index.min(s.commit_index);
+            self.persisted.insert(key, high.max(safe));
+        }
     }
 
     /// **Election Safety** (§5.2): at most one leader per term.

@@ -82,6 +82,12 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] `enospc_after_bytes` — remodelled as live usage so compaction frees space,
       then a `diskfull` preset. Three bugs, each exposed by fixing the last.
 
+## Layer 3 — the oracle that found the root cause
+
+- [x] Durability oracle: what a node fsynced *and* committed must survive a
+      restart. Found CS-016 in one line after three oracles had spent the whole
+      project reporting its symptom.
+
 ## Known gaps
 
 Audited against the spec in [`ROADMAP.md`](ROADMAP.md). The three that matter:
@@ -91,8 +97,12 @@ Audited against the spec in [`ROADMAP.md`](ROADMAP.md). The three that matter:
 - [x] ~~`corrupt_ppm` and `enospc_after_bytes` never fire~~ — both now have
       presets. ENOSPC needed a modelling fix first: it counted cumulative bytes
       written, so a node that tripped the quota once could never write again.
-- [ ] CS-009 and CS-012 open, probably one cause; the Helm chart has no
-      templates; throughput is 7.4k/sec against a 50k–150k target.
+- [x] ~~CS-009 and CS-012 open, probably one cause~~ — they were one cause,
+      CS-016, and both now pass as regression tests.
+- [ ] CS-018 open: a residual 1-2 entry durable-and-committed loss, 2-5% of
+      seeds, not a sampling artifact. Suspect CS-003's clamp masks it.
+- [ ] The Helm chart has no templates; throughput is 7.4k/sec against a
+      50k-150k target.
 
 ## Evidence
 

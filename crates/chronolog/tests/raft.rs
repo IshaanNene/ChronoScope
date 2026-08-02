@@ -81,7 +81,15 @@ impl Cluster {
                 self.wire.push((id, *to, msg.clone()));
             }
         }
-        self.nodes.get_mut(&id).unwrap().advance(&ready);
+        // This harness stands in for the driver, so it owes Raft the same
+        // contract: say what is durable. It models a disk that never fails, so
+        // everything appended is immediately persisted — but it still has to be
+        // *said*, because a node's vote in its own quorum is backed by its disk,
+        // not by its memory.
+        let raft = self.nodes.get_mut(&id).unwrap();
+        let last = raft.last_index();
+        raft.set_persisted(last);
+        raft.advance(&ready);
     }
 
     fn pump_all(&mut self) {

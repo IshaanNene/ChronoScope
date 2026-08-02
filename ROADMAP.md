@@ -16,17 +16,20 @@ Work that does neither is listed last, honestly labelled, and should probably
 stay unbuilt. A simulator with more features and fewer findings is a worse
 artifact than this one.
 
-Current state: **15 bugs, 13 fixed, 2 open.** 203 tests, 0 clippy warnings, a
-200-seed static swarm clean at ~3300x compression.
+Current state: **18 bugs, 16 fixed, 2 open.** 205 tests, 0 clippy warnings.
 
 Swarm results by fault mode, 200 seeds each, 400 simulated seconds:
 
-| Preset | Failures | Notes |
+| Preset | Failures | Of which durability (CS-018) |
 |---|---|---|
-| `nemesis` (static) | 0 / 200 | |
-| `corrupting` | 1 / 200 | the CS-009 shape, not corruption-specific |
-| membership, every 15s | 17 / 200 | all liveness; see the cost table in `BUGS.md` |
-| `diskfull` | 10 / 200 | all liveness |
+| `nemesis` (static) | 8 / 200 | 8 |
+| `corrupting` | 2 / 200 | 2 |
+| `diskfull` | 16 / 200 | 5 |
+| membership, every 15s | 18 / 200 | 4 |
+
+The counts went *up* this round because a new oracle started reporting a class
+of failure nothing was previously looking for. That is the right direction: an
+oracle that finds nothing is indistinguishable from one that is not running.
 
 ---
 
@@ -153,13 +156,38 @@ Lower than the three above because it needs a new trait rather than flipping a
 constant, but it is a real hole in the "every source of nondeterminism is
 captured" claim.
 
-## P0.5 — Close CS-009 and CS-012
+## ~~P0.5 — Close CS-009 and CS-012~~ — **DONE**
 
-Two open bugs, and probably one cause. Both are a committed entry overwritten
-across a term boundary; CS-012 surfaced only under membership churn, which
-suggests reconfiguration widens a window that already existed. Two independent
-reproductions of the same shape are more useful for finding the cause than
-either alone.
+Both closed, and they did share one cause: [CS-016](BUGS.md), a durability
+barrier that covered only the active segment. A batch crossing a rollover left
+the earlier segment's tail in the page cache while the node reported it durable
+and acknowledged it to its leader. One missing `fsync` cost 455 entries.
+
+The three reproductions were right to be treated as one bug.
+
+**The method is the transferable part.** Three oracles had been reporting
+divergent applied histories thousands of events downstream of the fault. What
+found it was a fourth oracle checking the actual contract — *acknowledged means
+durable* — which named the node and the two indices in a single line. Assert
+the invariant where it should hold, not where the symptom appears.
+
+It also turned up [CS-017](BUGS.md) immediately: `persisted` was inferred from
+what Raft asked to be written and could only rise, so a node went on offering a
+quorum index its disk no longer held.
+
+### What is left: CS-018
+
+A residual **one-to-two entry** loss, in every fault mode, at 2-5% of seeds.
+Confirmed not to be a sampling artifact — narrowing the oracle's sampling
+interval 125-fold reproduces it identically.
+
+The leading suspicion is that [CS-003](BUGS.md)'s commit clamp is *masking* a
+Leader Completeness violation rather than preventing one: it lowers
+`commitIndex` when a merge truncates, which keeps the node locally consistent
+and removes the evidence before any other oracle looks. Worth being sure before
+changing, because the alternative fix is the opposite of what CS-003 did.
+
+The original CS-009 detail, kept for the record:
 
 CS-009's detail: A follower applies entries a later term overwrites, at seed
 `0x1`. What is known and what is not is written up in `BUGS.md`; the remaining

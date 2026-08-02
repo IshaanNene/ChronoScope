@@ -1,7 +1,7 @@
 # BUGS.md
 
-Real correctness bugs the simulator found in Chronolog. Fifteen so far:
-thirteen fixed, two open.
+Real correctness bugs the simulator found in Chronolog. Eighteen so far:
+sixteen fixed, two open.
 
 This file is the point of the project. Anyone can assert their distributed
 system is correct; this is the evidence that mine was not, in specific and
@@ -279,13 +279,13 @@ quorum.
 
 ---
 
-## CS-009 — **OPEN** — a follower applies entries a later term overwrites
+## CS-009 — a follower applies entries a later term overwrites — **FIXED by CS-016**
 
 | | |
 |---|---|
 | **Found by** | Raft invariants, `nemesis`, seed `0x1` |
-| **Status** | **Open** |
-| **Reproduce** | `cargo test -p chrono-oracle --release -- --ignored cs_009` |
+| **Status** | Fixed — root cause was CS-016 |
+| **Reproduce** | `cargo test -p chrono-oracle --release cs_009` (now passes) |
 
 ```
 COMMIT MONOTONICITY VIOLATED: n0 commit index went 3854 -> 3825 without restarting
@@ -391,13 +391,13 @@ that appears stuck.
 
 ---
 
-## CS-012 — **OPEN** — State Machine Safety under membership churn
+## CS-012 — State Machine Safety under membership churn — **FIXED by CS-016**
 
 | | |
 |---|---|
 | **Found by** | Raft invariants, `nemesis` + membership, seed `0x89` |
-| **Status** | **Open** |
-| **Reproduce** | `chronoscope run --seed 0x89 --secs 400 --keys 4 --clients 4 --spares 2 --reconfigure-secs 15` |
+| **Status** | Fixed — root cause was CS-016 |
+| **Reproduce** | `chronoscope run --seed 0x89 --secs 400 --keys 4 --clients 4 --spares 2 --reconfigure-secs 15` (now passes) |
 
 ```
 STATE MACHINE SAFETY VIOLATED: n1 and n2 applied different histories through index 9837
@@ -410,7 +410,11 @@ a committed entry overwritten across a term boundary — which suggests the two
 share a cause, and that membership churn simply widens the window that produces
 it.
 
-**A third reproduction has since appeared**, under the `corrupting` preset at a
+**Both are now closed by [CS-016](#cs-016--the-durability-barrier-did-not-cover-the-whole-batch).**
+Seeds `0x1` and `0x89` run clean, and both are regression tests. The write-up
+below is kept because the reasoning is the useful part.
+
+**A third reproduction had appeared** under the `corrupting` preset at a
 different seed:
 
 ```
@@ -508,6 +512,122 @@ and it guards the ordinary snapshot path too, where the same hazard exists.
 Together, CS-013 through CS-015 took the `diskfull` swarm from 37 failures in
 200 seeds to 10, all of them liveness stalls — which a full disk genuinely
 causes.
+
+---
+
+## CS-016 — the durability barrier did not cover the whole batch
+
+| | |
+|---|---|
+| **Found by** | A purpose-built durability oracle, chasing CS-009 |
+| **Severity** | **Data loss** — the foundational contract, broken |
+| **Fixed** | `Wal::sync`, `crates/chronolog/src/wal.rs` |
+
+**This is the cause of CS-009 and CS-012**, and it took three attempts to find
+because every tool I had reported the symptom rather than the fault.
+
+`sync()` fsynced `self.segments.last()` — the active segment. A batch that
+crosses a rollover writes into *two* files, so the earlier segment's tail stayed
+in the page cache while the caller was told the whole batch was durable. The
+node then acknowledged those entries to its leader, they counted toward a
+quorum, and a crash made them vanish.
+
+The damage compounds. Recovery finds a one-entry hole at the segment boundary,
+stops there — correctly, holes are worse than short logs — and discards every
+later segment. In the reproducing seed the node fsynced through 3855 and came
+back at 3400: **455 entries**, from one missing `fsync`. It then voted for a
+candidate that had never held those entries, and the new leader truncated them
+off a peer that did.
+
+**How it was actually found.** Three rounds of instrumentation, each answering
+one question the previous had raised:
+
+1. *Was the entry genuinely committed, or was the commit inflated?* A detector
+   in `handle_append` that fires on the message truncating below `commitIndex`,
+   printing both sides. Answer: the leader's `matchIndex` for two of three
+   nodes was legitimate, so the commit was real.
+2. *Then who lost it?* A durability oracle comparing what each node claimed to
+   have fsynced against what its next process lifetime recovered. It named the
+   node and the two indices in one line — `n1 fsynced through 3855 ... came back
+   with last=3400` — which is the whole diagnosis, six words long.
+3. *Where?* A probe on segment lifecycle showed a segment opened at 3402 when
+   the previous ended at 3400. One entry, exactly at a rollover.
+
+The lesson worth keeping: **assert the invariant where it should hold, not
+where the symptom appears.** Three oracles had been reporting divergent applied
+histories thousands of events downstream. One oracle checking the actual
+contract — *acknowledged means durable* — pointed straight at it.
+
+**Fix.** Track a dirty flag per segment and fsync every one the batch touched.
+The global `dirty` flag was removed entirely at the same time: a second source
+of truth alongside the per-segment flags, which `truncate_from` and `reset_to`
+both cleared, and which could therefore short-circuit a later `sync` while a
+segment still held unsynced writes.
+
+---
+
+## CS-017 — a node's quorum contribution outlived its disk
+
+| | |
+|---|---|
+| **Found by** | The same durability oracle, immediately after CS-016 |
+| **Severity** | Safety — the CS-008 mistake, one step later |
+| **Fixed** | `Raft::set_persisted`, `crates/chronolog/src/raft.rs` |
+
+`persisted` — the index a node offers to its own quorum — was inferred from
+what Raft *asked* to be written, and only ever raised.
+
+Both halves were wrong. Inferring is a guess that happens to be right whenever
+the write path does exactly what was requested, and misses every case where it
+does not: a rollback, a partial batch, a repair. And a high-water mark cannot
+express truncation — a conflicting `AppendEntries` removes durable entries, so
+the mark went on claiming an index the disk no longer held.
+
+This is [CS-008](#cs-008) one step later. There, the leader counted its
+un-fsynced tail toward a quorum; here, it counts a tail that was fsynced and
+then removed. Same consequence: if elected, it leads on a log shorter than it
+advertised.
+
+**Fix.** The WAL is the authority. The driver reports `wal.last_index()` after
+a successful sync, and `set_persisted` assigns rather than raises.
+
+---
+
+## CS-018 — **OPEN** — a committed, durable entry lost across a restart
+
+| | |
+|---|---|
+| **Found by** | The durability oracle, all fault modes |
+| **Status** | **Open** |
+| **Reproduce** | `chronoscope run --seed 0x1b --secs 400 --keys 4 --clients 4` |
+
+```
+DURABILITY VIOLATED: n2 had committed data durable through 20092 before
+restarting but came back with last=20091 — acknowledged data was lost
+```
+
+What remains after CS-016. The loss is consistently **one or two entries**,
+never the hundreds that the segment-boundary bug produced, and it appears in
+every fault mode at roughly 2-5% of seeds.
+
+**It is not a sampling artifact.** The oracle observes between slices, so a
+legitimate truncation landing between the last observation and the crash would
+look identical. Narrowing the sampling interval from 250ms to 2ms — 125 times
+tighter — reproduces the same violation at the same index. (That the numbers
+are *identical* across sampling rates is also a small proof the simulation is
+independent of how often it is observed.)
+
+**Why nothing else catches it.** The clamp added in [CS-003](#cs-003) lowers
+`commitIndex` when a merge truncates, which keeps the node locally safe and
+erases the evidence: by the time Leader Completeness looks, the entry is no
+longer below the node's commit index. The durability oracle sees it only
+because it remembers what was true before the restart.
+
+The leading suspicion is therefore that CS-003's clamp is masking a genuine
+Leader Completeness violation rather than preventing one — that a committed
+entry really is being truncated, and the clamp makes the node quietly agree to
+it. That is a different fix from the one CS-003 applied, and worth being sure
+about before changing.
 
 ---
 
@@ -610,7 +730,17 @@ cluster's apparent commit index.
 ## Current state
 
 ```
-200-seed nemesis swarm      0 failures, 86.7 node-hours simulated in 95s (3282x)
-determinism guard           32 seeds x2, all identical
-test suite                  192 passing, 1 ignored (CS-009)
+determinism guard   32 seeds x2, all identical
+test suite          205 passing, 0 ignored
+
+200-seed swarms, 400 simulated seconds each:
+  nemesis        8 / 200      corrupting     2 / 200
+  diskfull      16 / 200      membership    18 / 200
+
+of which  19 durability (CS-018, open)
+          23 liveness stalls
+           2 WAL contiguity under a full disk
 ```
+
+The durability oracle is new in this round and accounts for most of those
+numbers — it reports a class of failure nothing was previously looking for.

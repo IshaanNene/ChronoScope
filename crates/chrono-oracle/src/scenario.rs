@@ -474,7 +474,14 @@ pub fn run_with_probe(
     // --- run, sampling the oracles between slices ------------------------
     let mut invariants = Invariants::new();
     let mut watchdog = Watchdog::new(Budget::default());
-    let slice = Nanos::from_millis(250);
+    // How often the oracles sample. Between two samples the cluster can do
+    // anything, including legitimately truncating an entry that the previous
+    // sample saw as durable — so a narrower slice is a stricter check.
+    let slice = std::env::var("CS_SLICE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Nanos::from_millis)
+        .unwrap_or(Nanos::from_millis(250));
     let mut outcome = Outcome::HorizonReached;
 
     while sim.now() < config.duration {

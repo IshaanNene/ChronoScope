@@ -14,9 +14,15 @@ written against those traits. It never names a socket, a file descriptor, a
 clock, or a thread — so the same code runs against the simulator's virtual
 world and against real hardware, unchanged.
 
-The payoff is [`BUGS.md`](BUGS.md): fifteen real consensus and storage bugs the
+The payoff is [`BUGS.md`](BUGS.md): eighteen real consensus and storage bugs the
 simulator found in this implementation, each with what it looked like, what it
-actually was, and why it was hard to see. Thirteen fixed, two open.
+actually was, and why it was hard to see. Sixteen fixed, two open.
+
+The one worth reading is [CS-016](BUGS.md): the write-ahead log's durability
+barrier fsynced only the *active* segment, so a batch crossing a rollover left
+entries in the page cache while the node reported them durable and counted them
+toward a quorum. One missing `fsync`, 455 entries lost, and a committed entry
+overwritten — surfacing thousands of events later as two replicas that disagree.
 
 ```
 $ chronoscope swarm --seeds 200 --secs 400
@@ -155,7 +161,7 @@ Three, each answering a different question:
 | Oracle | Question | Catches |
 |---|---|---|
 | Linearizability | Did it look correct from outside? | Stale reads, lost writes, phantom values |
-| Raft invariants | Is it correct inside? | Election Safety, Log Matching, Leader Completeness, State Machine Safety |
+| Raft invariants | Is it correct inside? | Election Safety, Log Matching, Leader Completeness, State Machine Safety, durability across restarts |
 | Liveness watchdog | Is it doing anything at all? | Deadlock, stranded followers, stalled commits |
 
 The invariant oracle is an omniscient observer reading every node's log at

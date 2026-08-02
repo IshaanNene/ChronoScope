@@ -192,6 +192,13 @@ pub struct PublicState {
     pub commit_index: Index,
     pub applied_index: Index,
     pub last_index: Index,
+    /// Highest index this node has fsynced and acknowledged.
+    ///
+    /// The whole durability contract in one number: after a restart, the
+    /// recovered log must reach at least this far. Anything less means the node
+    /// told the cluster something was safe that was not, which is how a
+    /// committed entry gets overwritten.
+    pub persisted_index: Index,
     pub snapshot_index: Index,
     pub config: String,
     /// Voters in this node's current configuration, including the outgoing
@@ -209,6 +216,12 @@ pub struct PublicState {
     /// values linger. A liveness oracle that trusts them concludes the cluster
     /// is stuck at whatever index the dead node last reported.
     pub up: bool,
+    /// Set once the driver has finished recovering and published real state.
+    ///
+    /// Without it, an oracle reads the zeroed state a freshly-registered handle
+    /// starts with and concludes the node came back empty — every restart looks
+    /// like total data loss.
+    pub recovered: bool,
     /// Set if the driver loop terminated. A node whose driver has stopped is
     /// the worst kind of failure: still up, still accepting connections, still
     /// reporting its last known state, and never making progress again. Making
@@ -468,6 +481,10 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
             }
             return Err(e);
         }
+
+        // The WAL is the authority on what is durable, so it is what advances
+        // the quorum-eligible index.
+        raft.set_persisted(wal.last_index());
 
         // Only now, with everything durable, may anything be sent.
         for (to, msg) in &ready.messages {
@@ -875,6 +892,7 @@ fn publish(
 ) {
     let mut s = handle.state.lock().unwrap();
     s.node = raft.id;
+    s.recovered = true;
     s.role = match raft.role() {
         Role::Follower => "follower",
         Role::PreCandidate => "pre-candidate",
@@ -886,6 +904,7 @@ fn publish(
     s.commit_index = raft.commit_index();
     s.applied_index = raft.applied_index();
     s.last_index = raft.last_index();
+    s.persisted_index = raft.persisted_index();
     s.snapshot_index = raft.log().snapshot_index();
     let cfg = raft.config();
     s.config = cfg.to_string();

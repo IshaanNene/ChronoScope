@@ -45,15 +45,11 @@ fn a_benign_run_is_clean_and_makes_progress() {
     );
 }
 
-/// Seeds known to be clean, guarding against regression.
-///
-/// Seed 0x1 is deliberately absent: it reproduces an open State Machine Safety
-/// violation, recorded in `BUGS.md` as CS-009 with a dedicated reproduction
-/// below. Silently widening this range to exclude it would hide the fact that
-/// it fails; listing it as ignored says so out loud.
+/// Seeds guarding against regression. Seed 1 is back in the range: it used to
+/// reproduce CS-009 and no longer does.
 #[test]
 fn a_nemesis_run_holds_every_safety_property() {
-    for seed in [0u64, 2, 3, 4, 5, 6, 7, 8] {
+    for seed in 0..12u64 {
         let report = scenario::run(&quick(seed, FaultPolicy::nemesis()));
         assert!(
             report.invariants.ok(),
@@ -73,7 +69,6 @@ fn a_nemesis_run_holds_every_safety_property() {
 /// Kept as an executable reproduction rather than a comment: when the bug is
 /// fixed this starts passing, and `cargo test -- --ignored` says so.
 #[test]
-#[ignore = "CS-009: open State Machine Safety violation; see BUGS.md"]
 fn cs_009_state_machine_safety_at_seed_1() {
     let report = scenario::run(&quick(1, FaultPolicy::nemesis()));
     assert!(
