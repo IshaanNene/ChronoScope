@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.pdb
+.DS_Store
+
+# swarm output: failing-seed artifacts are regenerated, not committed
+/artifacts
+/swarm-out
+*.trace.json
+perf.data*
+flamegraph.svg

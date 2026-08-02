@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chrono-sim",
+    "crates/chronolog",
+    "crates/chrono-oracle",
+    "crates/chronoscope",
+    "crates/chronolog-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/IshaanNene/ChronoScope"
+authors = ["Ishaan Nene"]
+
+[workspace.dependencies]
+chrono-sim = { path = "crates/chrono-sim" }
+chronolog = { path = "crates/chronolog" }
+chrono-oracle = { path = "crates/chrono-oracle" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+debug = 1
+
+# The swarm runs thousands of seeds; `dev` builds are too slow to be useful and
+# `release` is too slow to compile in a tight loop. This is the middle.
+[profile.swarm]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = 0

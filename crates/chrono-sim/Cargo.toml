@@ -1,0 +1,19 @@
+[package]
+name = "chrono-sim"
+description = "Deterministic simulation runtime: virtualized clock, network, disk, and scheduler behind one seed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Deliberately empty. Every dependency is a potential source of ambient
+# nondeterminism (hash seeds, thread pools, clocks). The core links std only.
+[dependencies]
+
+[features]
+default = []
+# The `real` runtime uses OS threads and real syscalls. Off by default so the
+# simulator can never accidentally link a wall clock.
+real = []
