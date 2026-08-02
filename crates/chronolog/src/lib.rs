@@ -1,7 +1,10 @@
+pub mod chan;
 pub mod client;
 pub mod codec;
+pub mod kv;
 pub mod log;
 pub mod msg;
+pub mod node;
 pub mod raft;
 pub mod types;
 pub mod wal;

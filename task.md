@@ -32,16 +32,16 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 
 ## Layer 2 — `chronolog` (system under test)
 
-- [ ] Wire codec: length-prefixed framing, hand-rolled encode/decode
-- [ ] Segmented WAL: append-only segments, per-record CRC32C, group commit, `fsync` batching
-- [ ] WAL crash recovery: CRC scan, torn-tail truncation, segment rollover
-- [ ] Raft core: persistent state, log matching, election with pre-vote
-- [ ] Raft replication: `AppendEntries`, `nextIndex`/`matchIndex`, quorum commit advance
-- [ ] Snapshotting + log compaction + `InstallSnapshot`
-- [ ] Membership changes via joint consensus (`C_old,new` → `C_new`)
-- [ ] Linearizable reads: leader lease + `ReadIndex`
+- [x] Wire codec: length-prefixed framing, hand-rolled encode/decode
+- [x] Segmented WAL: append-only segments, per-record CRC32C, group commit, `fsync` batching
+- [x] WAL crash recovery: CRC scan, torn-tail truncation, segment rollover
+- [x] Raft core: persistent state, log matching, election with pre-vote
+- [x] Raft replication: `AppendEntries`, `nextIndex`/`matchIndex`, quorum commit advance
+- [x] Snapshotting + log compaction + `InstallSnapshot`
+- [x] Membership changes via joint consensus (`C_old,new` → `C_new`)
+- [x] Linearizable reads: leader lease + `ReadIndex`
 - [ ] KV state machine with per-key MVCC
-- [ ] Client session layer: idempotent request IDs, dedup table, `NotLeader` redirect
+- [~] Client session layer: types + codec done; dedup table lands with the KV state machine
 
 ## Layer 3 — oracles
 
@@ -71,6 +71,46 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 ---
 
 ## Work log
+
+### 2026-08-02 — Layer 2, part 1 (`9db8574`, `5fb8182`)
+
+**WAL + Raft are in and green: 75 tests across the two crates.**
+
+The WAL's headline property, checked over 60 randomized seeds against a
+disk that tears 40% and loses 30% of un-fsynced writes: *the recovered log
+is always a prefix of what was appended, and always includes everything a
+completed fsync acknowledged.*
+
+Raft is a pure state machine (`step` → `Ready`), so all of consensus is
+testable with a `BTreeMap` of nodes and a `Vec` of messages — no async, no
+simulator, no sleeps. 26 scenarios including figure 8, disruptive rejoin,
+and a joint transition between disjoint voter sets.
+
+**Two real bugs, caught the moment the harness ran:**
+
+1. `Raft::new` bootstrapped the config through `install_snapshot` at index 0.
+   `term_at(0)` returns the sentinel term 0, which *matches* the snapshot's
+   term, so the install took its compaction path — and compacting to index 0
+   early-returns. The config was silently dropped, no node was a voter, and no
+   election ever started. Fixed with an explicit `Log::bootstrap`.
+2. `Config::has_quorum` treated "a majority of the empty set" as vacuously
+   true, so an unconfigured node considered every decision unanimous. That
+   turns a bootstrap mistake into a safety violation rather than a hang.
+
+Neither needed the simulator — which is the argument for the pure-state-machine
+split. Cheap tests should catch cheap bugs; the seeds are for the executions
+nobody would think to write down.
+
+**Notes:**
+- A torn write only exercises the CRC if records *span sectors*. With 50-byte
+  entries and 512-byte sectors, tearing drops whole records and leaves a
+  legitimately clean, shorter log. That test now writes 8 KiB entries.
+- The pre-vote test has a control (`pre_vote: false`) asserting the disruption
+  is real. Without it the test proves nothing.
+- `Raft` keeps a stirred entropy word rather than taking `rand` at every call
+  site: campaigns can start from internal transitions (a pre-vote succeeding, a
+  `TimeoutNow`) where no fresh value is to hand, and always picking the minimum
+  timeout there would make two nodes split every vote identically.
 
 ### 2026-08-02 — Layer 1 landed (`20cd6f1`)
 

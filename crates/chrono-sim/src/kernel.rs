@@ -974,8 +974,16 @@ impl Sim {
     pub fn add_node(&self, id: NodeId, role: Role) -> Host {
         {
             let mut inner = self.k.lock();
-            let (max_skew, max_drift) =
-                (inner.policy.clock.max_skew.0, inner.policy.clock.max_drift_ppm);
+            // Clients get a perfect clock. They are not the system under
+            // test, and a workload generator whose own clock drifts cannot
+            // produce a history an oracle can reason about: the operation
+            // timestamps a linearizability checker orders by would themselves
+            // be wrong.
+            let (max_skew, max_drift) = if role == Role::Client {
+                (0, 0)
+            } else {
+                (inner.policy.clock.max_skew.0, inner.policy.clock.max_drift_ppm)
+            };
             let skew = if max_skew == 0 {
                 0
             } else {
