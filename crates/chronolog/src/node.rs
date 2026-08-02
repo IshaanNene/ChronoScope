@@ -50,6 +50,13 @@ pub struct NodeOptions {
     /// The cluster's initial membership, used only when there is nothing on
     /// disk to recover.
     pub bootstrap: Config,
+    /// Publish the per-index log terms and applied-history digest that the
+    /// Raft-invariant oracles need.
+    ///
+    /// Off by default because it copies the log on every driver cycle. That is
+    /// fine for a simulation whose whole point is to be inspected, and wasteful
+    /// for a production server that nobody is checking Log Matching on.
+    pub inspect: bool,
 }
 
 impl Default for NodeOptions {
@@ -59,6 +66,7 @@ impl Default for NodeOptions {
             wal: WalOptions::default(),
             tick_interval: Nanos::from_millis(20),
             bootstrap: Config::default(),
+            inspect: false,
         }
     }
 }
@@ -147,6 +155,15 @@ pub struct NodeHandle {
 #[derive(Clone, Debug, Default)]
 pub struct PublicState {
     pub node: NodeId,
+    /// Which process lifetime this state belongs to. Bumped by the observer
+    /// each time the node boots.
+    ///
+    /// Invariants like "the commit index never moves backwards" hold *within* a
+    /// process, not across a crash: Raft persists the commit index only as an
+    /// optimization, and a node that loses its un-fsynced tail to a torn write
+    /// legitimately comes back with a lower one. The leader refills it. Without
+    /// this field an oracle cannot tell that regression from a real one.
+    pub generation: u64,
     pub role: &'static str,
     pub term: u64,
     pub leader: Option<NodeId>,
@@ -158,6 +175,24 @@ pub struct PublicState {
     pub keys: usize,
     pub wal_segments: usize,
     pub wal_bytes: u64,
+    /// Set if the driver loop terminated. A node whose driver has stopped is
+    /// the worst kind of failure: still up, still accepting connections, still
+    /// reporting its last known state, and never making progress again. Making
+    /// it visible is the difference between a five-minute diagnosis and an
+    /// afternoon.
+    pub driver_error: Option<String>,
+    /// `(index, term)` for every entry still in the log. Populated only when
+    /// `NodeOptions::inspect` is set. This is what the Log Matching oracle
+    /// compares across nodes.
+    pub log_terms: Vec<(Index, u64)>,
+    /// Rolling digest of everything this node's state machine has applied,
+    /// sampled periodically as `(applied_index, digest)`.
+    ///
+    /// Two nodes that applied the same sequence must agree at every shared
+    /// checkpoint. Comparing digests rather than whole histories keeps this
+    /// O(1) per apply instead of O(n) per check — which matters, because the
+    /// oracle runs continuously.
+    pub apply_checkpoints: Vec<(Index, u64)>,
 }
 
 /// Start a node. Returns immediately; the work happens in spawned tasks.
@@ -172,8 +207,10 @@ pub fn start(host: Host, opts: NodeOptions) -> NodeHandle {
     };
     let h = handle.clone();
     host.spawn_with("chronolog", move |host| async move {
-        if let Err(e) = run(host.clone(), opts, h).await {
-            host.note(|| format!("driver stopped: {e}"));
+        if let Err(e) = run(host.clone(), opts, h.clone()).await {
+            let msg = e.to_string();
+            host.note(|| format!("DRIVER STOPPED: {msg}"));
+            h.state.lock().unwrap().driver_error = Some(msg);
         }
     });
     handle
@@ -244,6 +281,7 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
     let mut pending_writes: BTreeMap<Index, (NodeId, Request)> = BTreeMap::new();
     let mut pending_reads: BTreeMap<u64, Vec<(NodeId, Request)>> = BTreeMap::new();
     let mut was_leader = false;
+    let mut digest = ApplyDigest::new();
 
     while let Some(first) = events.recv().await {
         let mut batch = vec![first];
@@ -307,7 +345,7 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
         was_leader = is_leader;
 
         // --- the Ready cycle ----------------------------------------------
-        let truncate_to = raft.truncate_to;
+        let truncate_to = raft.truncate_to();
         let ready = raft.ready();
         persist(&host, &handle, &mut wal, &mut kv, &ready, truncate_to).await?;
 
@@ -322,6 +360,7 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
             &mut kv,
             &ready,
             &mut pending_writes,
+            &mut digest,
         );
 
         for read in &ready.reads {
@@ -368,7 +407,7 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
             }
         }
 
-        publish(&handle, &raft, &kv, &wal);
+        publish(&handle, &raft, &kv, &wal, &digest, opts.inspect);
     }
     Ok(())
 }
@@ -396,7 +435,12 @@ async fn persist(
             Ok(restored) => *kv = restored,
             Err(e) => host.note(|| format!("snapshot payload did not decode: {e}")),
         }
-        wal.compact_through(snap.last_index).await?;
+        // `reset_to`, not `compact_through`. A snapshot accepted from the
+        // leader replaces this node's log wholesale, so the WAL has to restart
+        // at the snapshot point rather than merely dropping superseded
+        // segments — otherwise the next append writes a gap the log can never
+        // recover across. See `Wal::reset_to`.
+        wal.reset_to(snap.last_index).await?;
         NodeMetrics::inc(&handle.metrics.snapshots_installed);
     }
     if let Some(hs) = ready.hard_state {
@@ -418,9 +462,11 @@ fn apply_committed(
     kv: &mut KvStore,
     ready: &Ready,
     pending_writes: &mut BTreeMap<Index, (NodeId, Request)>,
+    digest: &mut ApplyDigest,
 ) {
     for entry in &ready.committed {
         NodeMetrics::inc(&handle.metrics.commits);
+        digest.feed(entry);
         match &entry.kind {
             EntryKind::Noop => {}
             EntryKind::Config(change) => {
@@ -537,7 +583,66 @@ fn decode(env: &Envelope) -> Option<Event> {
     }
 }
 
-fn publish(handle: &NodeHandle, raft: &Raft, kv: &KvStore, wal: &Wal) {
+/// A digest of what the state machine applied, one entry at a time.
+///
+/// Deliberately **not** a rolling hash over the applied history. A cumulative
+/// chain is the obvious design and it is wrong here: a node caught up by
+/// snapshot genuinely did not apply the entries the snapshot covers, so its
+/// chain restarts and can never again match a peer that applied them all. The
+/// State Machine Safety oracle would then report a violation every single time
+/// a follower is caught up the fast way — a false positive on the most routine
+/// event in the system.
+///
+/// Hashing each entry independently keeps the comparison meaningful across any
+/// two nodes at any shared index, whatever route each took to get there. The
+/// "same prefix" half of the property is Log Matching's job, and that oracle
+/// checks it directly.
+#[derive(Debug, Default)]
+pub struct ApplyDigest {
+    checkpoints: Vec<(Index, u64)>,
+}
+
+impl ApplyDigest {
+    pub fn new() -> ApplyDigest {
+        ApplyDigest::default()
+    }
+
+    pub fn feed(&mut self, entry: &Entry) {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |v: u64| {
+            for i in 0..8 {
+                h ^= (v >> (i * 8)) & 0xFF;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        mix(entry.index);
+        mix(entry.term);
+        match &entry.kind {
+            EntryKind::Noop => mix(1),
+            EntryKind::Config(_) => mix(2),
+            EntryKind::Normal(d) => {
+                mix(3);
+                for b in d {
+                    mix(*b as u64);
+                }
+            }
+        }
+        self.checkpoints.push((entry.index, h));
+        // Bounded: the oracle only needs a recent overlapping window to compare.
+        if self.checkpoints.len() > 4096 {
+            self.checkpoints.drain(..2048);
+        }
+    }
+}
+
+fn publish(
+    handle: &NodeHandle,
+    raft: &Raft,
+    kv: &KvStore,
+    wal: &Wal,
+    digest: &ApplyDigest,
+    inspect: bool,
+) {
     let mut s = handle.state.lock().unwrap();
     s.node = raft.id;
     s.role = match raft.role() {
@@ -556,6 +661,15 @@ fn publish(handle: &NodeHandle, raft: &Raft, kv: &KvStore, wal: &Wal) {
     s.keys = kv.len();
     s.wal_segments = wal.segment_count();
     s.wal_bytes = wal.total_bytes();
+    if inspect {
+        s.log_terms = raft
+            .log()
+            .entries_from(raft.log().first_index())
+            .iter()
+            .map(|e| (e.index, e.term))
+            .collect();
+        s.apply_checkpoints = digest.checkpoints.clone();
+    }
 }
 
 /// Propose a membership change on whichever node is the leader. Exposed for

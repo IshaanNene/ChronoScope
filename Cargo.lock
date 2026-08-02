@@ -5,6 +5,10 @@ version = 3
 [[package]]
 name = "chrono-oracle"
 version = "0.1.0"
+dependencies = [
+ "chrono-sim",
+ "chronolog",
+]
 
 [[package]]
 name = "chrono-sim"

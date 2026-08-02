@@ -366,11 +366,19 @@ impl Wal {
         self.stats.appends += 1;
         for entry in entries {
             let expected = self.last_index() + 1;
-            debug_assert_eq!(
-                entry.index, expected,
-                "WAL appends must be contiguous: got {}, expected {expected}",
-                entry.index
-            );
+            // A hard error, not a `debug_assert`. A gap written here is silent
+            // and catastrophic: recovery stops at the first non-contiguous
+            // record, so the node comes back with a log truncated to *before*
+            // the gap, having already acknowledged and applied entries past it.
+            // The observable symptom is two replicas with divergent applied
+            // histories, thousands of events and one restart later — a
+            // spectacularly hard trail to follow back here. Refuse the write.
+            if entry.index != expected {
+                return Err(crate::codec_io_error(format!(
+                    "WAL appends must be contiguous: got {}, expected {expected}",
+                    entry.index
+                )));
+            }
 
             if self.segments.last().map(|s| s.size).unwrap_or(0) >= self.opts.segment_bytes {
                 self.stats.rollovers += 1;
@@ -488,6 +496,30 @@ impl Wal {
                 self.dirty = false;
             }
         }
+        Ok(())
+    }
+
+    /// Discard the entire log and restart it immediately after `index`.
+    ///
+    /// This is what installing a snapshot *from the leader* requires, and it is
+    /// distinct from [`Wal::compact_through`]. Compaction assumes the log
+    /// continues contiguously and therefore only drops whole superseded
+    /// segments, never the active one. But a follower that accepts a leader's
+    /// snapshot has had its log replaced wholesale: the in-memory log now
+    /// starts at `index + 1` while the WAL still ends wherever the node had
+    /// got to, which may be thousands of entries earlier. The next append then
+    /// writes a gap.
+    ///
+    /// Using compaction for both cases is the natural mistake, because in the
+    /// common case — a node only slightly behind — the indices happen to line
+    /// up and nothing goes wrong.
+    pub async fn reset_to(&mut self, index: Index) -> std::io::Result<()> {
+        for seg in std::mem::take(&mut self.segments) {
+            self.host.storage.remove(&seg.name).await?;
+            self.stats.segments_deleted += 1;
+        }
+        self.dirty = false;
+        self.open_segment(index + 1).await?;
         Ok(())
     }
 

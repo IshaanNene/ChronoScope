@@ -1,7 +1,13 @@
 [package]
 name = "chrono-oracle"
+description = "Oracles: a linearizability checker, Raft safety invariants, and a liveness watchdog."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 [dependencies]
+chrono-sim = { workspace = true }
+chronolog = { workspace = true }

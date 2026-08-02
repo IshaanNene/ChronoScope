@@ -30,6 +30,7 @@ fn options() -> NodeOptions {
         wal: WalOptions { segment_bytes: 32 * 1024, compact_slack_bytes: 8 * 1024 },
         tick_interval: Nanos::from_millis(20),
         bootstrap: Config::simple(0..SERVERS),
+        inspect: false,
     }
 }
 

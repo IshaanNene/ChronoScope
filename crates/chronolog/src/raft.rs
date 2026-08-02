@@ -230,8 +230,20 @@ pub struct Raft {
     /// The last hard state handed to the driver, so we only ask for a
     /// (expensive, fsync-bearing) write when something actually changed.
     persisted_hard_state: HardState,
-    /// Set when the log was truncated; the driver must mirror it in the WAL.
-    pub truncate_to: Option<Index>,
+    /// Lowest log index whose durable copy is out of date this cycle.
+    ///
+    /// A single watermark rather than an accumulated list of entries, because
+    /// the driver batches: several `AppendEntries` can be stepped before one
+    /// `Ready` is taken. Collecting entries per message and *assigning* them
+    /// loses everything an earlier message in the batch queued — the durable
+    /// log then gets a hole, and since recovery stops at the first
+    /// non-contiguous record, the node comes back having silently discarded
+    /// entries it already acknowledged.
+    ///
+    /// A watermark cannot have that bug: `ready()` always emits the whole
+    /// suffix from the lowest index touched, whatever order the batch arrived
+    /// in.
+    dirty_from: Option<Index>,
     /// Entropy for election timeouts, refreshed by the driver on every tick.
     ///
     /// The state machine stays pure — it never *reads* a generator — but
@@ -293,7 +305,7 @@ impl Raft {
             pending: Ready::default(),
             hard_state_dirty: false,
             persisted_hard_state: HardState::default(),
-            truncate_to: None,
+            dirty_from: None,
             rand: (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
         }
     }
@@ -497,7 +509,25 @@ impl Raft {
         self.pending_reads.push(PendingRead { ctx, index, acks });
         for peer in cfg.all_nodes() {
             if peer != self.id {
-                self.send(peer, Body::HeartbeatReq { commit: self.commit, ctx });
+                // Never tell a follower to commit past what we know it has
+                // *matching*.
+                //
+                // A heartbeat performs no consistency check — it carries no
+                // `prevLogIndex`/`prevLogTerm` — so the follower has no way to
+                // tell whether its log agrees with ours at the index we name.
+                // It clamps to its own `lastIndex`, which proves nothing: a
+                // follower holding a stale uncommitted tail from a previous
+                // term has a `lastIndex` that looks perfectly plausible.
+                //
+                // It then commits, and applies, an entry that is about to be
+                // overwritten — losing State Machine Safety via the read path,
+                // of all things. `matchIndex` is the only index we have
+                // actually proven this follower shares with us.
+                let matched = self.progress.get(&peer).map(|p| p.matched).unwrap_or(0);
+                self.send(
+                    peer,
+                    Body::HeartbeatReq { commit: self.commit.min(matched), ctx },
+                );
             }
         }
         Some(ctx)
@@ -584,6 +614,9 @@ impl Raft {
     /// once it has done it.
     pub fn ready(&mut self) -> Ready {
         let mut r = std::mem::take(&mut self.pending);
+        if let Some(from) = self.dirty_from {
+            r.entries = self.log.entries_from(from).to_vec();
+        }
         if self.hard_state_dirty {
             let hs = self.hard_state();
             if hs != self.persisted_hard_state {
@@ -591,7 +624,18 @@ impl Raft {
             }
             self.hard_state_dirty = false;
         }
-        // Entries the state machine has not seen yet.
+        // Belt and braces. Every path that sets `commit` clamps it to the log,
+        // but this is the last gate before entries reach the state machine and
+        // an apply cannot be taken back.
+        debug_assert!(
+            self.commit <= self.log.last_index(),
+            "n{} would apply past the end of its log: commit={} last={} applied={}",
+            self.id,
+            self.commit,
+            self.log.last_index(),
+            self.applied
+        );
+        self.commit = self.commit.min(self.log.last_index());
         if self.commit > self.applied {
             r.committed = self.log.slice(self.applied + 1, self.commit + 1).to_vec();
         }
@@ -606,7 +650,22 @@ impl Raft {
         if let Some(last) = ready.committed.last() {
             self.applied = last.index;
         }
-        self.truncate_to = None;
+        // The durable log now matches memory up to `last_index`.
+        self.dirty_from = None;
+    }
+
+    /// The index the driver must truncate the durable log to before appending
+    /// [`Ready::entries`]. `None` means the append is a pure extension.
+    pub fn truncate_to(&self) -> Option<Index> {
+        self.dirty_from
+    }
+
+    /// Mark the durable log stale from `index` onwards.
+    fn mark_dirty(&mut self, index: Index) {
+        self.dirty_from = Some(match self.dirty_from {
+            Some(existing) => existing.min(index),
+            None => index,
+        });
     }
 
     /// Build a snapshot boundary. The caller supplies the state machine image;
@@ -921,16 +980,34 @@ impl Raft {
         }
 
         let last_new = self.log.merge(prev_index, &entries);
-        if !entries.is_empty() {
-            // Whatever the merge kept or replaced, the durable copy must match.
-            self.truncate_to = Some(entries[0].index);
-            self.pending.entries = self.log.entries_from(entries[0].index).to_vec();
+        if let Some(first) = entries.first() {
+            // Whatever the merge kept or replaced, the durable copy must match
+            // from here on.
+            self.mark_dirty(first.index);
         }
 
         // §5.3: never commit past what we actually hold.
         let new_commit = leader_commit.min(last_new);
         if new_commit > self.commit {
             self.commit = new_commit;
+            self.hard_state_dirty = true;
+        }
+
+        // And never *keep* a commit index past what we hold either.
+        //
+        // The merge above may have truncated a conflicting suffix, and the
+        // commit index is not lowered anywhere else. Without this clamp a
+        // follower goes on claiming an index is committed after replacing the
+        // entry that was there — and `ready()` then hands those replaced,
+        // uncommitted entries to the state machine, because slicing to
+        // `commit + 1` silently clamps to the log's end. Two replicas apply
+        // different entries at the same index and Leader Completeness is gone.
+        //
+        // Lowering it locally is safe: a durable commit index is an
+        // optimization to avoid replaying the log, not a promise to the
+        // cluster. The leader will re-inform us.
+        if self.commit > self.log.last_index() {
+            self.commit = self.log.last_index();
             self.hard_state_dirty = true;
         }
 
@@ -1007,6 +1084,18 @@ impl Raft {
         self.commit = self.commit.max(index);
         self.applied = index;
         self.hard_state_dirty = true;
+
+        // Discard anything an earlier message in this same batch queued.
+        //
+        // The driver drains a whole burst of events before taking one `Ready`
+        // — that batching is group commit. So an `AppendEntries` at index 997
+        // can land in the same batch as a snapshot at 1000, leaving
+        // `pending.entries` starting at 997 while the log now begins at 1001.
+        // The driver resets the WAL to the snapshot point and then tries to
+        // append entry 997 into a log that starts at 1001. The snapshot
+        // supersedes every one of those entries; they must not survive it.
+        self.pending.entries.clear();
+        self.dirty_from = None;
         self.pending.snapshot = Some(snapshot);
         self.send(from, Body::SnapshotResp { success: true, index });
     }
@@ -1035,7 +1124,11 @@ impl Raft {
         }
         self.leader = Some(from);
         self.election_elapsed = 0;
-        // Only adopt a commit index we can actually back with entries.
+        // The leader has already capped this to our `matchIndex` — see
+        // `read_index`. Clamping to `lastIndex` as well is belt and braces, not
+        // the safety argument: on its own it is not sufficient, because a
+        // plausible `lastIndex` says nothing about whether the entry there is
+        // the same one the leader has.
         let safe = commit.min(self.log.last_index());
         if safe > self.commit {
             self.commit = safe;
@@ -1072,8 +1165,10 @@ impl Raft {
     // --- leader machinery ------------------------------------------------
 
     fn append_to_own_log(&mut self, entries: &[Entry]) {
+        if let Some(first) = entries.first() {
+            self.mark_dirty(first.index);
+        }
         self.log.append(entries);
-        self.pending.entries.extend_from_slice(entries);
         if let Some(p) = self.progress.get_mut(&self.id) {
             p.matched = self.log.last_index();
             p.next = p.matched + 1;

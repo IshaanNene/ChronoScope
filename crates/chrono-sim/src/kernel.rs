@@ -1136,6 +1136,25 @@ impl Sim {
         inner.nodes.iter().filter(|(_, n)| n.up && !n.paused).map(|(id, _)| *id).collect()
     }
 
+    /// Whether any link is currently cut.
+    ///
+    /// The liveness watchdog needs this: demanding progress from a partitioned
+    /// cluster is demanding a violation of CAP, so its budget only runs while
+    /// the environment is cooperating.
+    pub fn has_partitions(&self) -> bool {
+        !self.k.lock().blocked.is_empty()
+    }
+
+    /// Servers that are up and not frozen.
+    pub fn alive_servers(&self) -> usize {
+        let inner = self.k.lock();
+        inner
+            .nodes
+            .values()
+            .filter(|n| n.role == Role::Server && n.up && !n.paused)
+            .count()
+    }
+
     pub fn is_up(&self, node: NodeId) -> bool {
         self.k.lock().nodes.get(&node).map(|n| n.up && !n.paused).unwrap_or(false)
     }
