@@ -131,6 +131,17 @@ struct World {
     /// turn it on to watch the simulator demonstrate that.
     #[arg(long)]
     lease_reads: bool,
+    /// Extra nodes that boot but are not initially voters, available for the
+    /// membership workload to add.
+    #[arg(long, default_value_t = 0)]
+    spares: u32,
+    /// Attempt a membership change this often, in simulated seconds. 0 disables.
+    ///
+    /// This is the fault surface hand-written tests cannot reach: a joint
+    /// transition landing concurrently with a crash, a partition, or a snapshot
+    /// install.
+    #[arg(long, default_value_t = 0)]
+    reconfigure_secs: u64,
 }
 
 impl World {
@@ -155,6 +166,13 @@ impl World {
             policy,
             read_percent: self.reads,
             read_mode: chronolog::client::ReadMode::Linearizable,
+            spares: self.spares,
+            reconfigure_every: if self.reconfigure_secs == 0 {
+                None
+            } else {
+                Some(Nanos::from_secs(self.reconfigure_secs))
+            },
+            min_voters: 3,
             trace,
             lease_reads: self.lease_reads,
             limits: Limits::default(),
@@ -556,6 +574,9 @@ fn cmd_bench(seed: u64, servers: u32, clients: u32, secs: u64) -> i32 {
         max_ops_per_client: 1_000_000,
         // No think time: offer as much load as the clients can generate.
         think_time: Nanos::ZERO,
+        spares: 0,
+        reconfigure_every: None,
+        min_voters: 3,
         duration: Nanos::from_secs(secs),
         recovery: Nanos::from_secs(1),
         policy: FaultPolicy::benign(),

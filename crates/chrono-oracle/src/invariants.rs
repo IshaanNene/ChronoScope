@@ -38,6 +38,25 @@ pub struct ClusterView {
 }
 
 impl ClusterView {
+    /// Membership as the current leader understands it, falling back to the
+    /// union of every node's view when there is no leader to ask.
+    ///
+    /// The union alone is wrong: a node just removed still appears in some
+    /// lagging peer's stale configuration, and treating it as a member means
+    /// expecting replication to a node that is correctly being ignored.
+    pub fn members(&self) -> std::collections::BTreeSet<NodeId> {
+        self.nodes
+            .values()
+            .find(|s| s.up && s.role == "leader" && !s.voters.is_empty())
+            .map(|s| s.voters.iter().copied().collect())
+            .unwrap_or_else(|| {
+                self.nodes
+                    .values()
+                    .flat_map(|s| s.voters.iter().copied())
+                    .collect()
+            })
+    }
+
     pub fn leaders(&self) -> Vec<(NodeId, Term)> {
         self.nodes
             .iter()

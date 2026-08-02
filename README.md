@@ -14,9 +14,9 @@ written against those traits. It never names a socket, a file descriptor, a
 clock, or a thread — so the same code runs against the simulator's virtual
 world and against real hardware, unchanged.
 
-The payoff is [`BUGS.md`](BUGS.md): nine real consensus and storage bugs the
+The payoff is [`BUGS.md`](BUGS.md): twelve real consensus and storage bugs the
 simulator found in this implementation, each with what it looked like, what it
-actually was, and why it was hard to see. Eight fixed, one open.
+actually was, and why it was hard to see. Ten fixed, two open.
 
 ```
 $ chronoscope swarm --seeds 200 --secs 400
@@ -255,7 +255,23 @@ oracles, the swarm, and a production binary verified on real sockets and real
 - [`task.md`](task.md) — the running build log, including the decisions and the
   dead ends
 
-The largest known gap is that the swarm never proposes a **membership change**,
-so joint consensus — the part of Raft most likely to be subtly wrong — is
-exercised only by hand-written tests and never by a random schedule. That is
-P0.1 in the roadmap, and it is where the next bugs almost certainly are.
+The swarm now exercises **joint consensus** under chaos — adding and removing
+voters while nodes crash and partition, staging new voters through a learner.
+Turning that on found two real bugs within minutes, and quantified what
+reconfiguration costs:
+
+```
+failures per 200 seeds, nemesis, 400 simulated seconds
+
+  reconfiguration rate   direct voter add   learner first
+  never                       0 / 200            —
+  every 60s                   2 / 200            —
+  every 30s                  17 / 200         5 / 200
+  every 15s                  30 / 200        17 / 200
+```
+
+Every one of those is a liveness stall, not a safety violation. Adding a voter
+directly raises the quorum before the new node can help — three voters need
+two, four need three — so failure tolerance drops to zero until it catches up.
+A learner is replicated to without being counted. Halving the failure rate is
+what that argument looks like measured rather than asserted.

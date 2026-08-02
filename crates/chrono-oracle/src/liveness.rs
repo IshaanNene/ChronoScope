@@ -189,10 +189,31 @@ impl Watchdog {
         // Only running nodes count. A crashed node's last published state
         // lingers, and treating it as current makes a stopped node look like a
         // stuck cluster.
-        let live: Vec<(&NodeId, &chronolog::node::PublicState)> =
-            view.nodes.iter().filter(|(_, s)| s.up).collect();
+        // Membership, as the leader currently understands it.
+        //
+        // Taking the *union* across nodes is the obvious choice and is wrong:
+        // a node that was just removed still appears in some lagging peer's
+        // stale view, so it is judged as a member nobody is replicating to —
+        // which is precisely what should be happening to it. The leader's
+        // configuration is the authoritative one; only with no leader is the
+        // union a reasonable fallback.
+        let members = view.members();
+        let live: Vec<(&NodeId, &chronolog::node::PublicState)> = view
+            .nodes
+            .iter()
+            .filter(|(id, s)| s.up && (members.is_empty() || members.contains(id)))
+            .collect();
         let alive = live.len();
-        let quorum = voters / 2 + 1;
+        // Derive the quorum from the *current* configuration, not from how many
+        // nodes the scenario started with. Under a membership workload those
+        // differ, and a watchdog quoting the wrong quorum reports a healthy
+        // 4-voter cluster as down.
+        let voter_count = if members.is_empty() {
+            voters
+        } else {
+            members.len()
+        };
+        let quorum = voter_count / 2 + 1;
 
         // --- is there a leader? ------------------------------------------
         let leaders: Vec<(NodeId, u64)> = live

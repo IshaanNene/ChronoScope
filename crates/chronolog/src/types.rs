@@ -12,6 +12,8 @@ use chrono_sim::traits::NodeId;
 use crate::codec::{DecodeError, Reader, Result, Writer};
 
 pub type Term = u64;
+/// `NodeId`, re-exported so wire types can name it without reaching across crates.
+pub type NodeIdRepr = NodeId;
 pub type Index = u64;
 
 // ---------------------------------------------------------------------------

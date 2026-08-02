@@ -882,6 +882,63 @@ fn a_follower_past_the_compaction_point_is_caught_up_by_snapshot() {
     c.check_all();
 }
 
+#[test]
+fn a_fresh_voter_gets_a_snapshot_rather_than_empty_appends() {
+    // Regression for the storm found the first time the swarm was allowed to
+    // change membership.
+    //
+    // A node joining at `next = 1` when the leader has compacted past index 1
+    // must be flagged for a snapshot. The tempting check — `term_at(prev_index)`
+    // returning `None` — does not catch it, because `term_at(0)` answers
+    // `Some(0)` for the sentinel that makes prevLogIndex arithmetic work at the
+    // start of time. The leader then sends an empty `AppendEntries` at prev=0,
+    // the empty follower accepts and replies `match=0`, and the pair spins
+    // forever without either side being wrong.
+    let mut c = Cluster::new(3);
+    let leader = c.elect();
+    for i in 0..80 {
+        c.propose(&cmd(&format!("k{i}"))).unwrap();
+    }
+    c.run(5);
+
+    // Compact the leader well past the start of the log.
+    let snap = c
+        .get(leader)
+        .snapshot_at_applied(b"image".to_vec())
+        .expect("leader can snapshot");
+    c.get_mut(leader).compact(&snap);
+    assert!(snap.last_index > 1);
+
+    // A brand new node, empty log, added as a voter.
+    let joiner: NodeId = 9;
+    c.nodes.insert(
+        joiner,
+        Raft::new(joiner, Config::simple(0..3), RaftOptions::default()),
+    );
+    c.applied.insert(joiner, Vec::new());
+    c.reads.insert(joiner, Vec::new());
+    let change = ConfigChange::EnterJoint {
+        incoming: (0..3u32).chain(std::iter::once(joiner)).collect(),
+        learners: BTreeSet::new(),
+    };
+    c.get_mut(leader).propose_config(change).unwrap();
+    c.settle();
+
+    // The leader must ask for a snapshot rather than dribbling empty appends.
+    let mut asked = false;
+    for _ in 0..40 {
+        c.run(1);
+        if c.get(leader).followers_needing_snapshot().contains(&joiner) {
+            asked = true;
+            break;
+        }
+    }
+    assert!(
+        asked,
+        "a voter joining at index 1 against a compacted log must be flagged for a snapshot"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------

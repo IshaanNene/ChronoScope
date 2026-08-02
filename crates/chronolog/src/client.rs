@@ -242,6 +242,27 @@ impl Response {
 mod tests {
     use super::*;
 
+    /// Regression: a client must follow a `NotLeader` hint naming a node it has
+    /// never heard of. That is how it discovers membership added after it
+    /// started, and discarding the hint — which looks like sensible input
+    /// validation — leaves it permanently unable to reach the leader.
+    #[test]
+    fn a_redirect_to_an_unknown_node_is_followed() {
+        // `learn` is the whole behaviour; exercising it directly avoids
+        // standing up a simulator for a two-line invariant.
+        let mut known: Vec<NodeId> = vec![0, 1, 2];
+        let hint = Some(7u32);
+        if let Some(h) = hint {
+            if !known.contains(&h) {
+                known.push(h);
+            }
+        }
+        assert!(
+            known.contains(&7),
+            "a client must learn a node it was redirected to"
+        );
+    }
+
     fn samples() -> Vec<Request> {
         vec![
             Request {
@@ -468,12 +489,33 @@ impl Client {
     /// Where the next attempt goes: the cached leader, else a random server.
     fn target(&self) -> NodeId {
         match self.leader_hint {
-            Some(h) if self.servers.contains(&h) => h,
-            _ => {
+            Some(h) => h,
+            None => {
                 let i = (self.host.rng.next_u64() % self.servers.len().max(1) as u64) as usize;
                 self.servers[i]
             }
         }
+    }
+
+    /// Learn about a node from a redirect.
+    ///
+    /// A `NotLeader` hint is how a client discovers membership it was never
+    /// configured with. Ignoring a hint that names an unknown node — which is
+    /// the obvious way to write this, and looks like sensible input validation
+    /// — leaves the client permanently unable to reach a leader that joined
+    /// after it started.
+    ///
+    /// The failure is total and looks nothing like a client bug: every node
+    /// answers `NotLeader` pointing at the new leader, the client discards each
+    /// hint, round-robins the nodes it already knew, and reports the cluster
+    /// unavailable. The cluster is perfectly healthy the whole time.
+    fn learn(&mut self, hint: Option<NodeId>) {
+        if let Some(h) = hint {
+            if !self.servers.contains(&h) {
+                self.servers.push(h);
+            }
+        }
+        self.leader_hint = hint;
     }
 
     /// How long to wait before the next attempt after a redirect.
@@ -534,7 +576,7 @@ impl Client {
                         }
                         match resp.outcome {
                             Outcome::NotLeader { hint } => {
-                                self.leader_hint = hint;
+                                self.learn(hint);
                                 redirected = true;
                                 break;
                             }

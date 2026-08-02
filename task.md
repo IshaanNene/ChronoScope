@@ -69,18 +69,24 @@ Living document, updated as work lands. Status: `[ ]` todo · `[~]` in progress 
 - [x] Helm chart
 - [x] Terraform (namespace, PDB, odd-replica validation)
 
+## Layer 2 — membership under chaos
+
+- [x] Admin wire path (`Wire::Admin`) so a controller can submit changes
+- [x] Membership controller in the scenario harness: add/remove voters under chaos
+- [x] New voters staged through a learner, measured at half the failure rate
+- [x] Oracles taught the difference between "not a member" and "not converging"
+
 ## Known gaps
 
 Audited against the spec in [`ROADMAP.md`](ROADMAP.md). The three that matter:
 
-- [ ] **The swarm never proposes a membership change** — joint consensus is
-      exercised by hand-written tests only, never by a random schedule. The
-      spec predicts this is where hand-rolled Raft is wrong; it has not had the
-      chance to prove it.
+- [x] ~~The swarm never proposes a membership change~~ — done, and it found
+      CS-010, CS-011, and CS-012 immediately.
 - [ ] `corrupt_ppm` and `enospc_after_bytes` are modelled and set to zero in
-      every preset, so two fault paths are never exercised in a live run.
-- [ ] CS-009 open; the Helm chart has no templates; throughput is 7.4k/sec
-      against a 50k–150k target.
+      every preset, so two fault paths are never exercised in a live run. Both
+      are one constant.
+- [ ] CS-009 and CS-012 open, probably one cause; the Helm chart has no
+      templates; throughput is 7.4k/sec against a 50k–150k target.
 
 ## Evidence
 

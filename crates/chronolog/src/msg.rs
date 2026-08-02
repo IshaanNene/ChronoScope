@@ -322,12 +322,35 @@ pub fn unframe(buf: &[u8]) -> Result<&[u8]> {
     Ok(payload)
 }
 
-/// Everything a peer can send us: Raft traffic, or a client request.
+/// How a membership change turned out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminResult {
+    /// Appended to the leader's log at this index. Not yet committed — the
+    /// caller must observe the configuration to know it took effect.
+    Accepted { index: Index },
+    NotLeader {
+        hint: Option<crate::types::NodeIdRepr>,
+    },
+    /// Refused. Overlapping transitions cannot be reasoned about, so exactly
+    /// one change may be in flight.
+    Rejected,
+}
+
+/// Everything a peer can send us: Raft traffic, a client request, or a
+/// membership change.
+///
+/// Membership is deliberately a separate channel from the client protocol.
+/// Reconfiguration is an operator action with a completely different
+/// authorization story and a completely different failure mode — a client
+/// write that is refused is retried, a reconfiguration that is refused needs a
+/// human to look at why.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Wire {
     Raft(Message),
     Client(crate::client::Request),
     Reply(crate::client::Response),
+    Admin(crate::types::ConfigChange),
+    AdminReply(AdminResult),
 }
 
 impl Wire {
@@ -346,6 +369,31 @@ impl Wire {
                 payload.push(2);
                 payload.extend_from_slice(&r.encode());
             }
+            Wire::Admin(c) => {
+                payload.push(3);
+                let mut w = Writer::new();
+                c.encode(&mut w);
+                payload.extend_from_slice(&w.finish());
+            }
+            Wire::AdminReply(r) => {
+                payload.push(4);
+                let mut w = Writer::new();
+                match r {
+                    AdminResult::Accepted { index } => {
+                        w.u8(0).u64(*index);
+                    }
+                    AdminResult::NotLeader { hint } => {
+                        w.u8(1);
+                        w.opt(hint, |w, h| {
+                            w.u32(*h);
+                        });
+                    }
+                    AdminResult::Rejected => {
+                        w.u8(2);
+                    }
+                }
+                payload.extend_from_slice(&w.finish());
+            }
         }
         frame(&payload)
     }
@@ -357,6 +405,21 @@ impl Wire {
             0 => Ok(Wire::Raft(Message::decode(rest)?)),
             1 => Ok(Wire::Client(crate::client::Request::decode(rest)?)),
             2 => Ok(Wire::Reply(crate::client::Response::decode(rest)?)),
+            3 => Ok(Wire::Admin(crate::types::ConfigChange::decode(
+                &mut Reader::new(rest),
+            )?)),
+            4 => {
+                let mut r = Reader::new(rest);
+                let result = match r.u8()? {
+                    0 => AdminResult::Accepted { index: r.u64()? },
+                    1 => AdminResult::NotLeader {
+                        hint: r.opt(|r| r.u32())?,
+                    },
+                    2 => AdminResult::Rejected,
+                    t => return Err(DecodeError::BadTag(t)),
+                };
+                Ok(Wire::AdminReply(result))
+            }
             t => Err(DecodeError::BadTag(*t)),
         }
     }

@@ -14,7 +14,7 @@
 //! observation identical to the run without it, which is what makes
 //! `chronoscope run` and `chronoscope check` comparable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,9 +25,10 @@ use chrono_sim::time::Nanos;
 use chrono_sim::trace::TraceMode;
 use chrono_sim::traits::{Host, NodeId};
 use chronolog::client::{CallResult, Client, Op, Outcome as ClientOutcome, ReadMode};
+use chronolog::msg::{AdminResult, Wire};
 use chronolog::node::{self, NodeHandle, NodeOptions};
 use chronolog::raft::RaftOptions;
-use chronolog::types::Config;
+use chronolog::types::{Config, ConfigChange};
 use chronolog::wal::WalOptions;
 
 use crate::history::{Event, History, Op as HOp, Ret};
@@ -62,6 +63,18 @@ pub struct ScenarioConfig {
     pub think_time: Nanos,
     /// How long to run before healing everything and checking recovery.
     pub duration: Nanos,
+    /// Extra nodes that boot but are **not** initially voters, available for
+    /// the membership workload to add.
+    pub spares: u32,
+    /// How often to attempt a membership change. `None` disables the workload.
+    ///
+    /// This is the fault surface the swarm exists to explore. Hand-written
+    /// tests cover the transitions someone thought to write down; only a random
+    /// schedule produces a joint transition that lands concurrently with a
+    /// leader crash, a partition, or a snapshot install.
+    pub reconfigure_every: Option<Nanos>,
+    /// Never shrink the voter set below this.
+    pub min_voters: u32,
     /// How long to allow for recovery after the chaos stops.
     pub recovery: Nanos,
     pub policy: FaultPolicy,
@@ -83,6 +96,9 @@ impl Default for ScenarioConfig {
             keys: 6,
             max_ops_per_client: 20_000,
             think_time: Nanos::from_millis(25),
+            spares: 0,
+            reconfigure_every: None,
+            min_voters: 3,
             duration: Nanos::from_secs(4 * 3600),
             recovery: Nanos::from_secs(120),
             policy: FaultPolicy::nemesis(),
@@ -110,6 +126,8 @@ pub struct RunReport {
     pub watchdog: Watchdog,
     pub ops_ok: u64,
     pub ops_unknown: u64,
+    /// Membership changes the controller got accepted.
+    pub reconfigurations: u64,
     /// Retained event trace, when the trace mode kept one. This is what
     /// `chronoscope replay` renders.
     pub trace: Vec<chrono_sim::trace::Entry>,
@@ -185,6 +203,13 @@ impl std::fmt::Display for RunReport {
             self.ops_unknown,
             self.history.max_concurrency()
         )?;
+        if self.reconfigurations > 0 {
+            writeln!(
+                f,
+                "membership       {} changes accepted",
+                self.reconfigurations
+            )?;
+        }
         writeln!(f, "linearizability  {}", self.linearizability)?;
         writeln!(f, "invariants       {}", self.invariants)?;
         writeln!(f, "liveness         {}", self.watchdog)?;
@@ -233,16 +258,16 @@ pub fn run_with_probe(
     // tell a restart from a regression.
     let handles: Handles = Arc::new(Mutex::new(BTreeMap::new()));
     let hs = Arc::clone(&handles);
-    let servers = config.servers;
+    let total_servers = config.servers + config.spares;
     sim.set_boot(move |host: Host| {
-        if host.node < servers {
+        if host.node < total_servers {
             let h = node::start(host.clone(), opts.clone());
             let mut map = hs.lock().unwrap();
             let generation = map.get(&host.node).map(|(g, _)| g + 1).unwrap_or(0);
             map.insert(host.node, (generation, h));
         }
     });
-    for id in 0..config.servers {
+    for id in 0..(config.servers + config.spares) {
         sim.add_node(id, Role::Server);
     }
 
@@ -333,6 +358,114 @@ pub fn run_with_probe(
         });
     }
 
+    // --- the membership controller ---------------------------------------
+    //
+    // Runs on its own client node so chaos never touches it, and drives one
+    // change at a time: propose a new voter set, wait, propose the next. The
+    // leader finishes each joint transition itself via
+    // `maybe_finish_config_change`; the controller only ever asks to *enter*
+    // one.
+    let reconfigs = Arc::new(AtomicU64::new(0));
+    if let Some(period) = config.reconfigure_every {
+        let host = sim.add_node(CLIENT_BASE + 500, Role::Client);
+        let cfg = config.clone();
+        let stop_flag = Arc::clone(&stop);
+        let counter = Arc::clone(&reconfigs);
+        host.spawn_with("membership-controller", move |h| async move {
+            let all: Vec<NodeId> = (0..(cfg.servers + cfg.spares)).collect();
+            let mut voters: BTreeSet<NodeId> = (0..cfg.servers).collect();
+            // Replies land here so the controller can follow leader hints
+            // rather than broadcasting blindly.
+            let inbox: chronolog::chan::Chan<(NodeId, AdminResult)> = chronolog::chan::Chan::new();
+            let rx = inbox.clone();
+            h.spawn_with("controller-rx", |hh| async move {
+                while let Some(env) = hh.net.recv().await {
+                    if let Ok(Wire::AdminReply(r)) = Wire::decode(&env.payload) {
+                        rx.send((env.from, r));
+                    }
+                }
+                rx.close();
+            });
+
+            let mut leader_hint: Option<NodeId> = None;
+            let mut learners: BTreeSet<NodeId> = BTreeSet::new();
+            loop {
+                h.sleep(period).await;
+                if stop_flag.load(Ordering::SeqCst) {
+                    return;
+                }
+
+                // Pick the next voter set: add an outsider or drop a voter.
+                let outsiders: Vec<NodeId> = all
+                    .iter()
+                    .copied()
+                    .filter(|id| !voters.contains(id) && !learners.contains(id))
+                    .collect();
+                // Promote a learner that has caught up, before starting
+                // anything new.
+                //
+                // Adding a voter *directly* is the obvious move and it costs
+                // availability: the moment it joins, the quorum rises — three
+                // voters need two, four need three — while the new node has
+                // nothing and cannot help. The cluster's failure tolerance
+                // drops to zero until it catches up. Staging through a learner
+                // replicates to it without counting it, so the quorum only
+                // rises once it can actually contribute.
+                if let Some(&pending) = learners.iter().next() {
+                    let mut target = voters.clone();
+                    target.insert(pending);
+                    let change = ConfigChange::EnterJoint {
+                        incoming: target.clone(),
+                        learners: BTreeSet::new(),
+                    };
+                    if send_change(&h, &inbox, &mut leader_hint, &voters, change).await {
+                        voters = target;
+                        learners.remove(&pending);
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    continue;
+                }
+
+                let can_grow = !outsiders.is_empty();
+                let can_shrink = voters.len() > cfg.min_voters as usize;
+                // Grow when shrinking is not allowed, otherwise flip a coin.
+                let grow = can_grow && (!can_shrink || h.rng.next_u64() % 2 == 0);
+                let mut target = voters.clone();
+                if grow {
+                    // Join as a learner: replicated to, not counted.
+                    let i = (h.rng.next_u64() % outsiders.len() as u64) as usize;
+                    let joining = outsiders[i];
+                    let change = ConfigChange::EnterJoint {
+                        incoming: voters.clone(),
+                        learners: [joining].into_iter().collect(),
+                    };
+                    if send_change(&h, &inbox, &mut leader_hint, &voters, change).await {
+                        learners.insert(joining);
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    continue;
+                } else if can_shrink {
+                    let current: Vec<NodeId> = voters.iter().copied().collect();
+                    let i = (h.rng.next_u64() % current.len() as u64) as usize;
+                    target.remove(&current[i]);
+                } else {
+                    continue;
+                }
+                if target == voters || target.is_empty() {
+                    continue;
+                }
+                let change = ConfigChange::EnterJoint {
+                    incoming: target.clone(),
+                    learners: BTreeSet::new(),
+                };
+                if send_change(&h, &inbox, &mut leader_hint, &voters, change).await {
+                    voters = target;
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
     sim.boot_all();
 
     // --- run, sampling the oracles between slices ------------------------
@@ -347,7 +480,15 @@ pub fn run_with_probe(
         let view = collect_live(&handles, &sim);
         probe(sim.now(), &view);
         invariants.check(&view);
-        let healthy = !sim.has_partitions() && sim.alive_servers() * 2 > config.servers as usize;
+        // "Healthy" has to mean a quorum of the *current* configuration is up.
+        //
+        // Comparing against the number of servers the scenario started with is
+        // the obvious shortcut and breaks the moment membership changes: a
+        // cluster grown to four voters needs three of them, and counting five
+        // booted processes against an initial three says everything is fine
+        // while the cluster genuinely has no quorum. The watchdog then demands
+        // a leader that cannot legally be elected.
+        let healthy = !sim.has_partitions() && quorum_alive(&view, &sim, config.servers);
         watchdog.observe(
             sim.now(),
             &view,
@@ -415,9 +556,55 @@ pub fn run_with_probe(
         watchdog,
         ops_ok,
         ops_unknown,
+        reconfigurations: reconfigs.load(Ordering::SeqCst),
         trace,
         ok,
     }
+}
+
+/// Submit one membership change and wait, briefly, for the answer.
+///
+/// Returns whether it was appended. A dropped request is not an error — the
+/// next tick tries again, which is exactly how an operator retries.
+async fn send_change(
+    h: &Host,
+    inbox: &chronolog::chan::Chan<(NodeId, AdminResult)>,
+    leader_hint: &mut Option<NodeId>,
+    voters: &BTreeSet<NodeId>,
+    change: ConfigChange,
+) -> bool {
+    let target_node = leader_hint.unwrap_or_else(|| {
+        let live: Vec<NodeId> = voters.iter().copied().collect();
+        live[(h.rng.next_u64() % live.len().max(1) as u64) as usize]
+    });
+    h.net.send(target_node, Wire::Admin(change).encode());
+
+    let deadline = inbox.clone();
+    h.spawn_with("controller-timeout", move |hh| async move {
+        hh.sleep(Nanos::from_secs(2)).await;
+        deadline.send((NodeId::MAX, AdminResult::Rejected));
+    });
+    match inbox.recv().await {
+        Some((_, AdminResult::Accepted { .. })) => true,
+        Some((_, AdminResult::NotLeader { hint })) => {
+            *leader_hint = hint;
+            false
+        }
+        _ => {
+            *leader_hint = None;
+            false
+        }
+    }
+}
+
+/// Whether a majority of the current voter set is running.
+fn quorum_alive(view: &ClusterView, sim: &Sim, fallback: u32) -> bool {
+    let members = view.members();
+    if members.is_empty() {
+        return sim.alive_servers() * 2 > fallback as usize;
+    }
+    let alive = members.iter().filter(|id| sim.is_up(**id)).count();
+    alive * 2 > members.len()
 }
 
 fn collect(handles: &Handles) -> ClusterView {

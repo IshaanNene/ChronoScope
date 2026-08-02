@@ -1,7 +1,7 @@
 # BUGS.md
 
-Real correctness bugs the simulator found in Chronolog. Nine so far: eight
-fixed, one open.
+Real correctness bugs the simulator found in Chronolog. Twelve so far: ten
+fixed, two open.
 
 This file is the point of the project. Anyone can assert their distributed
 system is correct; this is the evidence that mine was not, in specific and
@@ -312,6 +312,139 @@ interaction between joint-consensus quorum counting and a restarted node.
 It is recorded here rather than quietly excluded because an honest ledger is
 the entire deliverable. The regression suite runs seeds `0, 2..8`; seed `1` is
 an ignored test that will start passing when this is fixed.
+
+---
+
+## CS-010 — a new voter and a compacted leader spin forever on empty appends
+
+| | |
+|---|---|
+| **Found by** | The membership workload, first run, `nemesis`, seed `0x1` |
+| **Severity** | Liveness + resource exhaustion — the node can never catch up |
+| **Fixed** | `Raft::send_append_to`, `crates/chronolog/src/raft.rs` |
+
+Found within minutes of letting the swarm change membership for the first time,
+which is exactly what [`ROADMAP.md`](ROADMAP.md) predicted would happen.
+
+**Presented as** a run that took 27 seconds instead of 1.2, having sent **17
+million messages** where the same workload without a membership change sends
+257 thousand.
+
+**Actually was** the sentinel. `send_append_to` decides a follower needs a
+snapshot when `term_at(prev_index)` returns `None` — but `term_at(0)` answers
+`Some(0)`, because index 0 is the "before the beginning" sentinel that makes
+`prevLogIndex` arithmetic work at the start of time. A node joining at
+`next = 1` — exactly where a newly added voter starts — therefore passes the
+check even when the leader has compacted through index 5000.
+
+What follows is worse than a missed snapshot. `slice(1, 65)` clamps to the
+log's real start and comes back **empty**, so the leader sends an empty
+`AppendEntries` at `prev = 0`; the follower's log is also empty, so it accepts
+and replies `match = 0`; the leader sees it is still behind and immediately
+sends another. Neither side is wrong. Nobody makes progress. The pair spins as
+fast as the network allows.
+
+**Why it was hard to see.** It needs a node whose log starts at 1 *and* a
+leader that has compacted past it. A static cluster never produces that
+combination: every node is present from index 1 and stays roughly caught up.
+Adding a voter produces it on the first try.
+
+**Fix.** Ask the real question — are the entries this follower needs still in
+the log — rather than a proxy for it: `p.next < self.log.first_index()`.
+
+---
+
+## CS-011 — a client cannot follow a redirect to a node it does not know
+
+| | |
+|---|---|
+| **Found by** | The membership workload, `nemesis`, seed `0x1` |
+| **Severity** | Liveness — the cluster is healthy and unreachable |
+| **Fixed** | `Client::learn`, `crates/chronolog/src/client.rs` |
+
+**Presented as** a leader that led for 30 seconds with its commit index frozen
+"despite pending work", on a cluster where all four nodes were caught up and
+agreed on everything.
+
+**Actually was** entirely on the client side. It was configured with servers
+`{0,1,2}`. Once the membership workload added n3 and leadership moved there,
+every node correctly answered `NotLeader { hint: 3 }` — and the client
+discarded each hint, because n3 was not in its list:
+
+```rust
+match self.leader_hint {
+    Some(h) if self.servers.contains(&h) => h,   // n3 fails this
+    _ => random_from(self.servers),               // ...so round-robin {0,1,2}
+}
+```
+
+It round-robined the three nodes it already knew, forever, and reported the
+cluster unavailable. The cluster was perfectly healthy the entire time.
+
+**Why it was hard to see.** The guard looks like sensible input validation —
+do not chase a hint naming a node you have never heard of. It is exactly
+backwards: a redirect is *how* a client discovers membership added after it
+started. And the symptom points at the server, because the server is the thing
+that appears stuck.
+
+**Fix.** Learn the node from the hint and follow it.
+
+---
+
+## CS-012 — **OPEN** — State Machine Safety under membership churn
+
+| | |
+|---|---|
+| **Found by** | Raft invariants, `nemesis` + membership, seed `0x89` |
+| **Status** | **Open** |
+| **Reproduce** | `chronoscope run --seed 0x89 --secs 400 --keys 4 --clients 4 --spares 2 --reconfigure-secs 15` |
+
+```
+STATE MACHINE SAFETY VIOLATED: n1 and n2 applied different histories through index 9837
+LEADER COMPLETENESS VIOLATED: index 9837 was committed in term 4 but n1 now holds term 5 there
+```
+
+One seed in 200 under aggressive reconfiguration. The same shape as
+[CS-009](#cs-009--open--a-follower-applies-entries-a-later-term-overwrites) —
+a committed entry overwritten across a term boundary — which suggests the two
+share a cause, and that membership churn simply widens the window that produces
+it.
+
+Recorded rather than chased, because a second independent reproduction of the
+same shape is more useful for finding the cause than either one alone.
+
+---
+
+## What membership churn costs, measured
+
+The swarm had never proposed a configuration change until now. Turning it on
+was the single most productive change in the project, and it also quantified
+something worth knowing.
+
+Failures per 200 seeds, `nemesis`, 400 simulated seconds:
+
+| Reconfiguration rate | Direct voter add | Learner first |
+|---|---|---|
+| never | 0 / 200 | — |
+| every 60s | 2 / 200 | — |
+| every 30s | 17 / 200 | **5 / 200** |
+| every 15s | 30 / 200 | **17 / 200** |
+
+Two conclusions.
+
+**Reconfiguration costs availability, and the cost is real rather than a bug.**
+Every failure above is a liveness stall — "no leader for N seconds" — and not
+one is a safety violation, apart from CS-012. A configuration change is a
+leadership disruption; doing one every 15 simulated seconds while nodes are
+also crashing means the cluster spends much of its life in transition.
+
+**Adding a voter directly is measurably worse than staging through a learner,**
+and the mechanism is clean: the moment a node joins as a voter the quorum
+rises — three voters need two, four need three — while the new node has nothing
+and cannot help. Failure tolerance drops to zero until it catches up. A learner
+is replicated to without being counted, so the quorum only rises once the node
+can actually contribute. Halving the failure rate at both churn rates is what
+that argument looks like when it is measured instead of asserted.
 
 ---
 

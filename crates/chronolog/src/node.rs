@@ -34,7 +34,7 @@ use chrono_sim::traits::{Envelope, Host, NodeId};
 use crate::chan::Chan;
 use crate::client::{Op, Outcome, ReadMode, Request, Response};
 use crate::kv::KvStore;
-use crate::msg::{Message, Wire};
+use crate::msg::{AdminResult, Message, Wire};
 use crate::raft::{Raft, RaftOptions, Ready, Role};
 use crate::types::{Config, ConfigChange, Entry, EntryKind, Index, Snapshot};
 use crate::wal::{Wal, WalOptions};
@@ -90,6 +90,7 @@ enum Event {
     Tick,
     Wire { from: NodeId, msg: Message },
     Client { from: NodeId, req: Request },
+    Admin { from: NodeId, change: ConfigChange },
 }
 
 /// Counters, exported as Prometheus metrics by the server and asserted on by
@@ -112,6 +113,8 @@ pub struct NodeMetrics {
     pub reads_linearizable: AtomicU64,
     pub reads_lease: AtomicU64,
     pub reads_stale: AtomicU64,
+    pub config_changes_proposed: AtomicU64,
+    pub config_changes_applied: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -141,6 +144,8 @@ impl NodeMetrics {
             "reads_linearizable" => &self.reads_linearizable,
             "reads_lease" => &self.reads_lease,
             "reads_stale" => &self.reads_stale,
+            "config_changes_proposed" => &self.config_changes_proposed,
+            "config_changes_applied" => &self.config_changes_applied,
             _ => return 0,
         };
         c.load(Ordering::Relaxed)
@@ -186,6 +191,13 @@ pub struct PublicState {
     pub last_index: Index,
     pub snapshot_index: Index,
     pub config: String,
+    /// Voters in this node's current configuration, including the outgoing
+    /// half while a joint transition is in flight.
+    ///
+    /// A liveness oracle needs this: a node that is not a member is not
+    /// supposed to be replicated to, and reporting it as "not converging" is
+    /// how a membership workload drowns the swarm in false failures.
+    pub voters: Vec<NodeId>,
     pub keys: usize,
     pub wal_segments: usize,
     pub wal_bytes: u64,
@@ -323,6 +335,27 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
                     }
                 }
                 Event::Wire { from, msg } => raft.step(from, msg),
+                Event::Admin { from, change } => {
+                    NodeMetrics::inc(&handle.metrics.config_changes_proposed);
+                    let result = if !raft.is_leader() {
+                        AdminResult::NotLeader {
+                            hint: raft.leader(),
+                        }
+                    } else {
+                        match raft.propose_config(change.clone()) {
+                            Some(index) => {
+                                host.note(|| {
+                                    format!("membership change {change:?} proposed at {index}")
+                                });
+                                AdminResult::Accepted { index }
+                            }
+                            // Exactly one change may be in flight; overlapping
+                            // joint transitions have no safety argument.
+                            None => AdminResult::Rejected,
+                        }
+                    };
+                    host.net.send(from, Wire::AdminReply(result).encode());
+                }
                 Event::Client { from, req } => {
                     NodeMetrics::inc(&handle.metrics.client_requests);
                     handle_client(
@@ -557,6 +590,7 @@ fn apply_committed(
         match &entry.kind {
             EntryKind::Noop => {}
             EntryKind::Config(change) => {
+                NodeMetrics::inc(&handle.metrics.config_changes_applied);
                 host.note(|| format!("applied config change {change:?} at {}", entry.index));
             }
             EntryKind::Normal(data) => {
@@ -689,8 +723,12 @@ fn decode(env: &Envelope) -> Option<Event> {
             from: env.from,
             req,
         }),
-        // A node does not act on replies; only clients do.
-        Wire::Reply(_) => None,
+        Wire::Admin(change) => Some(Event::Admin {
+            from: env.from,
+            change,
+        }),
+        // A node does not act on replies; only the sender does.
+        Wire::Reply(_) | Wire::AdminReply(_) => None,
     }
 }
 
@@ -768,7 +806,16 @@ fn publish(
     s.applied_index = raft.applied_index();
     s.last_index = raft.last_index();
     s.snapshot_index = raft.log().snapshot_index();
-    s.config = raft.config().to_string();
+    let cfg = raft.config();
+    s.config = cfg.to_string();
+    s.voters = cfg
+        .voters
+        .iter()
+        .chain(cfg.outgoing.iter())
+        .copied()
+        .collect();
+    s.voters.sort_unstable();
+    s.voters.dedup();
     s.keys = kv.len();
     s.wal_segments = wal.segment_count();
     s.wal_bytes = wal.total_bytes();

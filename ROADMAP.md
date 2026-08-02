@@ -16,8 +16,8 @@ Work that does neither is listed last, honestly labelled, and should probably
 stay unbuilt. A simulator with more features and fewer findings is a worse
 artifact than this one.
 
-Current state: **9 bugs, 8 fixed, 1 open.** 199 tests, 0 clippy warnings, a
-150-seed swarm clean at 3315x compression.
+Current state: **12 bugs, 10 fixed, 2 open.** 201 tests, 0 clippy warnings, a
+200-seed static swarm clean at ~3300x compression.
 
 ---
 
@@ -27,9 +27,32 @@ These are the highest-value items in the file. Each one is a *class of
 execution the simulator currently cannot reach*, which means any bug living
 there is invisible today.
 
-## P0.1 — The swarm never proposes a membership change
+The first one is now done, and it is worth reading the result before picking
+the next: enabling it found two real bugs within minutes, plus one open safety
+violation and three mistakes in the oracle itself. The pattern generalises —
+**the cheapest bugs to find are the ones behind a fault the swarm is not yet
+allowed to inject.** P0.2 and P0.3 are both single constants.
 
-**This is the single biggest gap in the project.**
+## ~~P0.1 — The swarm never proposes a membership change~~ — **DONE**
+
+**Done, and it paid immediately.** The swarm now runs a membership controller
+that adds and removes voters under chaos, staging new voters through a learner
+first. It found two real bugs within minutes ([CS-010](BUGS.md),
+[CS-011](BUGS.md)), one open safety violation ([CS-012](BUGS.md)), three
+mistakes in the liveness oracle, and a measured availability cost for
+reconfiguration.
+
+Remaining work in this area:
+- [ ] Chase CS-012 — likely shares a cause with CS-009.
+- [ ] The controller only ever grows via learner; removing a voter is still
+      direct. Staging removals (demote to learner, then remove) is the
+      symmetric improvement and is untested.
+- [ ] `min_voters` is fixed at 3. Exercising a 1-voter cluster and the
+      degenerate transitions around it would be worthwhile.
+
+The original justification, kept because it is why this was ranked first:
+
+**This was the single biggest gap in the project.**
 
 `crates/chronolog/tests/raft.rs` exercises joint consensus by hand: entering
 `C_old,new`, refusing overlapping transitions, requiring both majorities to
@@ -91,9 +114,15 @@ Lower than the three above because it needs a new trait rather than flipping a
 constant, but it is a real hole in the "every source of nondeterminism is
 captured" claim.
 
-## P0.5 — Close CS-009
+## P0.5 — Close CS-009 and CS-012
 
-The one open bug. A follower applies entries a later term overwrites, at seed
+Two open bugs, and probably one cause. Both are a committed entry overwritten
+across a term boundary; CS-012 surfaced only under membership churn, which
+suggests reconfiguration widens a window that already existed. Two independent
+reproductions of the same shape are more useful for finding the cause than
+either alone.
+
+CS-009's detail: A follower applies entries a later term overwrites, at seed
 `0x1`. What is known and what is not is written up in `BUGS.md`; the remaining
 suspects are the election restriction across a snapshot boundary and quorum
 counting after a restart. An ignored test reproduces it and will start passing

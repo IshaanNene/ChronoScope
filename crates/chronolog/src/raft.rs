@@ -1380,15 +1380,34 @@ impl Raft {
             return; // already shipping one
         }
 
+        // Does this follower need entries we no longer have?
+        //
+        // The obvious test — `term_at(prev_index)` returning `None` — is not
+        // enough, and the gap is nastier than it looks. `term_at(0)` answers
+        // `Some(0)` for the *sentinel* that makes `prevLogIndex` arithmetic
+        // work at the start of time. So a follower sitting at `next = 1`, which
+        // is exactly where a newly added voter starts, passes the check even
+        // when the log has been compacted through index 5000.
+        //
+        // What follows is worse than a missing snapshot. `slice(1, 65)` clamps
+        // to the log's real start and comes back *empty*, so the leader sends
+        // an empty `AppendEntries` at `prev = 0`; the follower's log is also
+        // empty, so it happily accepts and replies `match = 0`; the leader sees
+        // the follower is still behind and immediately sends another. Neither
+        // side is wrong, nobody makes progress, and the pair spins as fast as
+        // the network allows — 17 million messages in seven simulated minutes,
+        // where the same run without a membership change sent 257 thousand.
+        let needs_snapshot = p.next < self.log.first_index();
         let prev_index = p.next.saturating_sub(1);
-        let Some(prev_term) = self.log.term_at(prev_index) else {
-            // The entries this follower needs have been compacted away. It
-            // needs a snapshot, which only the driver can produce — flag it and
-            // let the driver call `send_snapshot`.
-            if let Some(p) = self.progress.get_mut(&peer) {
-                p.state = ProgressState::Snapshot;
+        let prev_term = match self.log.term_at(prev_index) {
+            Some(t) if !needs_snapshot => t,
+            _ => {
+                // Only the driver can build a snapshot; flag it and let it.
+                if let Some(p) = self.progress.get_mut(&peer) {
+                    p.state = ProgressState::Snapshot;
+                }
+                return;
             }
-            return;
         };
 
         let from = p.next;
