@@ -375,8 +375,14 @@ impl Wal {
             // spectacularly hard trail to follow back here. Refuse the write.
             if entry.index != expected {
                 return Err(crate::codec_io_error(format!(
-                    "WAL appends must be contiguous: got {}, expected {expected}",
-                    entry.index
+                    "WAL appends must be contiguous: got {}, expected {expected} \
+                     (wal first={} last={} segments={} batch={}..={})",
+                    entry.index,
+                    self.first_index(),
+                    self.last_index(),
+                    self.segments.len(),
+                    entries[0].index,
+                    entries[entries.len() - 1].index,
                 )));
             }
 
@@ -462,6 +468,19 @@ impl Wal {
     pub async fn truncate_from(&mut self, from: Index) -> std::io::Result<()> {
         if from > self.last_index() {
             return Ok(());
+        }
+        // A cut at or below where the log now starts removes everything.
+        //
+        // The subtle case, and the one that was wrong: the loop below refuses
+        // to pop the last remaining segment, so a cut below *its* first index
+        // fell through to `from.saturating_sub(seg.first_index)`, which
+        // saturates to "keep zero entries" and silently leaves the log ending
+        // at `first_index - 1` — a boundary the caller never asked for and does
+        // not know about. Memory and disk then disagree by however many entries
+        // that segment held, and nothing notices until a later append lands on
+        // the seam.
+        if from <= self.first_index() {
+            return self.reset_to(from.saturating_sub(1)).await;
         }
         self.stats.truncations += 1;
 

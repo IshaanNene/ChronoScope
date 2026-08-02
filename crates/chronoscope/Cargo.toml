@@ -1,7 +1,19 @@
 [package]
 name = "chronoscope"
+description = "Drive the deterministic simulator: run a seed, replay it, prove determinism, or swarm thousands."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "chronoscope"
+path = "src/main.rs"
 
 [dependencies]
+chrono-sim = { workspace = true }
+chronolog = { workspace = true }
+chrono-oracle = { workspace = true }
+clap = { version = "4", features = ["derive"] }

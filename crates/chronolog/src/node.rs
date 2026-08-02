@@ -175,6 +175,11 @@ pub struct PublicState {
     pub keys: usize,
     pub wal_segments: usize,
     pub wal_bytes: u64,
+    /// Whether the process is running. Set by the observer, not the node —
+    /// a crashed node cannot update its own state, and its last published
+    /// values linger. A liveness oracle that trusts them concludes the cluster
+    /// is stuck at whatever index the dead node last reported.
+    pub up: bool,
     /// Set if the driver loop terminated. A node whose driver has stopped is
     /// the worst kind of failure: still up, still accepting connections, still
     /// reporting its last known state, and never making progress again. Making
@@ -349,6 +354,21 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
         let ready = raft.ready();
         persist(&host, &handle, &mut wal, &mut kv, &ready, truncate_to).await?;
 
+        // Reconcile the durable log with memory.
+        //
+        // The `Ready` watermark says which entries Raft *believes* need
+        // writing, and threading that perfectly through every mutation —
+        // append, merge, truncate, snapshot install, local compaction — is
+        // exactly the kind of bookkeeping that goes subtly wrong. It did, three
+        // separate ways, and each time the symptom appeared thousands of events
+        // later as a follower that silently stopped replicating.
+        //
+        // So the watermark is treated as a fast path, not as the contract. The
+        // contract is simply: **the WAL mirrors the log**. Checking that
+        // directly costs two integer comparisons per cycle and cannot be got
+        // wrong by a path nobody thought about.
+        reconcile(&host, &handle, &mut wal, &raft).await?;
+
         // Only now, with everything durable, may anything be sent.
         for (to, msg) in &ready.messages {
             host.net.send(*to, Wire::Raft(msg.clone()).encode());
@@ -412,6 +432,41 @@ async fn run(host: Host, opts: NodeOptions, handle: NodeHandle) -> std::io::Resu
     Ok(())
 }
 
+/// Make the durable log match the in-memory log, whatever route either took.
+async fn reconcile(
+    host: &Host,
+    handle: &NodeHandle,
+    wal: &mut Wal,
+    raft: &Raft,
+) -> std::io::Result<()> {
+    let log = raft.log();
+    let (want_first, want_last) = (log.first_index(), log.last_index());
+    if wal.last_index() == want_last && wal.last_index() + 1 >= want_first {
+        return Ok(());
+    }
+
+    // The WAL is ahead, or its entries no longer connect to what the log holds.
+    // Either way the only sound move is to restart it at the log's base.
+    if wal.last_index() > want_last || wal.last_index() + 1 < want_first {
+        wal.reset_to(want_first.saturating_sub(1)).await?;
+    }
+
+    let from = wal.last_index() + 1;
+    let missing = log.entries_from(from).to_vec();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    host.note(|| {
+        format!("reconciling durable log: writing {}..={}", from, want_last)
+    });
+    wal.append(&missing).await?;
+    NodeMetrics::add(&handle.metrics.batched_entries, missing.len() as u64);
+    NodeMetrics::inc(&handle.metrics.batches);
+    wal.sync().await?;
+    NodeMetrics::inc(&handle.metrics.fsyncs);
+    Ok(())
+}
+
 /// Persist everything in a `Ready`, then fsync exactly once.
 async fn persist(
     host: &Host,
@@ -421,13 +476,19 @@ async fn persist(
     ready: &Ready,
     truncate_to: Option<Index>,
 ) -> std::io::Result<()> {
-    if !ready.needs_durability() {
-        return Ok(());
-    }
     // A conflicting suffix must leave the durable log before the replacement
     // enters it, or a crash in between would leave both.
+    //
+    // Note this runs even when there is nothing to append. A merge can truncate
+    // the log without producing any new entries — the leader rejected our tail
+    // and sent nothing to replace it yet — and skipping the truncation there
+    // leaves the durable log longer than memory, so the next append collides
+    // with entries that no longer exist.
     if let Some(from) = truncate_to {
         wal.truncate_from(from).await?;
+    }
+    if !ready.needs_durability() {
+        return Ok(());
     }
     if let Some(snap) = &ready.snapshot {
         wal.save_snapshot(snap).await?;

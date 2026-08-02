@@ -17,6 +17,7 @@
 //! partition healed, a quorum alive. Demanding progress from a cluster that is
 //! still partitioned would be demanding a violation of CAP.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono_sim::time::Nanos;
@@ -91,7 +92,14 @@ pub struct Watchdog {
     commit_moved_at: Nanos,
     /// When the last leader was seen.
     saw_leader_at: Nanos,
-    converged_at: Nanos,
+    /// Per node: the highest `last_index` seen, and when it last advanced.
+    ///
+    /// Convergence has to mean "the follower is making progress", not "the gap
+    /// is zero right now". Under a continuous write workload the gap is
+    /// essentially never zero — the leader is always a few entries ahead — so
+    /// an oracle keyed on an instantaneous gap reports every busy cluster as
+    /// broken. What actually matters is whether the follower is moving.
+    progress: BTreeMap<NodeId, (u64, Nanos)>,
     stalls: Vec<Stall>,
 }
 
@@ -103,7 +111,7 @@ impl Watchdog {
             best_commit: 0,
             commit_moved_at: Nanos::ZERO,
             saw_leader_at: Nanos::ZERO,
-            converged_at: Nanos::ZERO,
+            progress: BTreeMap::new(),
             stalls: Vec::new(),
         }
     }
@@ -144,17 +152,28 @@ impl Watchdog {
             self.healthy_since = None;
             self.saw_leader_at = now;
             self.commit_moved_at = now;
-            self.converged_at = now;
+            for (_, at) in self.progress.values_mut() {
+                *at = now;
+            }
             return;
         }
         let since = *self.healthy_since.get_or_insert(now);
         let healthy_for = now.saturating_sub(since);
 
-        let alive = view.nodes.len();
+        // Only running nodes count. A crashed node's last published state
+        // lingers, and treating it as current makes a stopped node look like a
+        // stuck cluster.
+        let live: Vec<(&NodeId, &chronolog::node::PublicState)> =
+            view.nodes.iter().filter(|(_, s)| s.up).collect();
+        let alive = live.len();
         let quorum = voters / 2 + 1;
 
         // --- is there a leader? ------------------------------------------
-        let leaders = view.leaders();
+        let leaders: Vec<(NodeId, u64)> = live
+            .iter()
+            .filter(|(_, s)| s.role == "leader")
+            .map(|(id, s)| (**id, s.term))
+            .collect();
         if leaders.is_empty() {
             if now.saturating_sub(self.saw_leader_at) > self.budget.elect_within {
                 self.record(Stall::NoLeader { healthy_for, alive, quorum });
@@ -164,8 +183,11 @@ impl Watchdog {
         }
 
         // --- is it committing? -------------------------------------------
-        let best = view.nodes.values().map(|s| s.commit_index).max().unwrap_or(0);
-        if best > self.best_commit {
+        let best = live.iter().map(|(_, s)| s.commit_index).max().unwrap_or(0);
+        // Any change restarts the clock, including a decrease. The maximum is
+        // taken over live nodes only, so it drops when the furthest-ahead node
+        // crashes — which is a change in the cluster, not a stall in it.
+        if best != self.best_commit {
             self.best_commit = best;
             self.commit_moved_at = now;
         } else if work_pending
@@ -180,29 +202,37 @@ impl Watchdog {
         }
 
         // --- are replicas converging? ------------------------------------
-        if let Some((leader, _)) = leaders.first() {
-            let leader_last = view.nodes.get(leader).map(|s| s.last_index).unwrap_or(0);
-            let worst = view
-                .nodes
-                .iter()
-                .filter(|(id, _)| *id != leader)
-                .map(|(id, s)| (*id, leader_last.saturating_sub(s.last_index)))
-                .max_by_key(|(_, gap)| *gap);
-            match worst {
-                Some((laggard, gap)) if gap > 0 => {
-                    if now.saturating_sub(self.converged_at) > self.budget.converge_within {
-                        self.record(Stall::NoConvergence {
-                            leader: *leader,
-                            laggard,
-                            gap,
-                            healthy_for,
-                        });
-                    }
-                }
-                _ => self.converged_at = now,
+        //
+        // A follower counts as converging while its own `last_index` advances,
+        // however far behind it is. Only a follower that is behind *and frozen*
+        // is stuck.
+        for (id, s) in &live {
+            let entry = self.progress.entry(**id).or_insert((s.last_index, now));
+            if s.last_index > entry.0 {
+                *entry = (s.last_index, now);
             }
-        } else {
-            self.converged_at = now;
+        }
+        if let Some((leader, _)) = leaders.first() {
+            let leader_last =
+                live.iter().find(|(id, _)| **id == *leader).map(|(_, s)| s.last_index).unwrap_or(0);
+            for (id, s) in &live {
+                if **id == *leader {
+                    continue;
+                }
+                let gap = leader_last.saturating_sub(s.last_index);
+                if gap == 0 {
+                    continue;
+                }
+                let frozen_since = self.progress.get(id).map(|(_, at)| *at).unwrap_or(now);
+                if now.saturating_sub(frozen_since) > self.budget.converge_within {
+                    self.record(Stall::NoConvergence {
+                        leader: *leader,
+                        laggard: **id,
+                        gap,
+                        healthy_for,
+                    });
+                }
+            }
         }
     }
 }
@@ -235,6 +265,7 @@ mod tests {
             role,
             commit_index: commit,
             last_index: last,
+            up: true,
             ..Default::default()
         }
     }
@@ -319,6 +350,44 @@ mod tests {
         }
         assert!(!w.ok());
         assert!(matches!(w.stalls()[0], Stall::NoCommitProgress { .. }), "{w}");
+    }
+
+    #[test]
+    fn a_follower_that_is_behind_but_advancing_is_not_flagged() {
+        // The common case under load: the leader is always a few entries ahead
+        // and the gap is never momentarily zero. That is a healthy cluster, and
+        // an oracle that reports it is worse than useless — in a 400-seed swarm
+        // it buried every real failure under false ones.
+        let mut w = Watchdog::new(Budget::default());
+        for i in 0..600u64 {
+            w.observe(
+                Nanos::from_secs(i),
+                &v(vec![n(0, "leader", i + 40, i + 40), n(1, "follower", i, i)]),
+                true,
+                true,
+                3,
+            );
+        }
+        assert!(w.ok(), "a follower that is behind but keeping up must not be flagged: {w}");
+    }
+
+    #[test]
+    fn a_crashed_node_does_not_make_the_cluster_look_stuck() {
+        // A crashed node's published state lingers at whatever index it last
+        // reported. If the oracle counts it, the cluster appears pinned there.
+        let mut w = Watchdog::new(Budget::default());
+        let mut dead = n(2, "follower", 9_000, 9_000);
+        dead.up = false;
+        for i in 0..600u64 {
+            w.observe(
+                Nanos::from_secs(i),
+                &v(vec![n(0, "leader", i, i), n(1, "follower", i, i), dead.clone()]),
+                true,
+                true,
+                3,
+            );
+        }
+        assert!(w.ok(), "{w}");
     }
 
     #[test]

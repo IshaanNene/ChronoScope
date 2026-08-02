@@ -105,6 +105,9 @@ pub struct RunReport {
     pub watchdog: Watchdog,
     pub ops_ok: u64,
     pub ops_unknown: u64,
+    /// Retained event trace, when the trace mode kept one. This is what
+    /// `chronoscope replay` renders.
+    pub trace: Vec<chrono_sim::trace::Entry>,
     /// True when nothing found anything wrong.
     pub ok: bool,
 }
@@ -325,7 +328,7 @@ pub fn run_with_probe(
     while sim.now() < config.duration {
         let target = (sim.now() + slice).min(config.duration);
         outcome = sim.run_until(target);
-        let view = collect(&handles);
+        let view = collect_live(&handles, &sim);
         probe(sim.now(), &view);
         invariants.check(&view);
         let healthy = !sim.has_partitions() && sim.alive_servers() * 2 > config.servers as usize;
@@ -365,7 +368,7 @@ pub fn run_with_probe(
         while sim.now() < deadline {
             let target = (sim.now() + slice).min(deadline);
             outcome = sim.run_until(target);
-            let view = collect(&handles);
+            let view = collect_live(&handles, &sim);
             invariants.check(&view);
             watchdog.observe(sim.now(), &view, true, false, config.servers as usize);
             if outcome.is_failure() || !invariants.ok() {
@@ -378,6 +381,9 @@ pub fn run_with_probe(
     let ops_unknown = history.unknown_count() as u64;
     let ops_ok = history.len() as u64 - ops_unknown;
     let verdict = linearizability::check(&history, config.limits);
+
+    let trace: Vec<chrono_sim::trace::Entry> =
+        sim.with_trace(|r| r.entries().cloned().collect());
 
     let ok = !outcome.is_failure()
         && invariants.ok()
@@ -397,6 +403,7 @@ pub fn run_with_probe(
         watchdog,
         ops_ok,
         ops_unknown,
+        trace,
         ok,
     }
 }
@@ -410,6 +417,17 @@ fn collect(handles: &Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>) -> Cluster
         nodes.insert(*id, state);
     }
     ClusterView { nodes }
+}
+
+fn collect_live(
+    handles: &Arc<Mutex<BTreeMap<NodeId, (u64, NodeHandle)>>>,
+    sim: &Sim,
+) -> ClusterView {
+    let mut view = collect(handles);
+    for (id, state) in view.nodes.iter_mut() {
+        state.up = sim.is_up(*id);
+    }
+    view
 }
 
 /// Run a seed twice and confirm the two universes were identical.

@@ -128,6 +128,8 @@ struct Progress {
     state: ProgressState,
     /// Index of the snapshot in flight, so we do not send it repeatedly.
     pending_snapshot: Index,
+    /// Ticks since that snapshot was sent, so a lost one can be resent.
+    pending_snapshot_age: u32,
     /// Whether this follower responded since the last check. Used by the
     /// leader to notice it has lost quorum contact.
     active: bool,
@@ -140,6 +142,7 @@ impl Progress {
             matched: 0,
             state: ProgressState::Probe,
             pending_snapshot: 0,
+            pending_snapshot_age: 0,
             active: false,
         }
     }
@@ -424,6 +427,7 @@ impl Raft {
                     self.election_elapsed = 0;
                     self.check_quorum();
                 }
+                self.expire_pending_snapshots();
             }
             _ => {
                 if self.promotable() && self.election_elapsed >= self.election_timeout {
@@ -615,6 +619,11 @@ impl Raft {
     pub fn ready(&mut self) -> Ready {
         let mut r = std::mem::take(&mut self.pending);
         if let Some(from) = self.dirty_from {
+            // Clamp to what the log still holds. A watermark can sit below the
+            // compaction point, and emitting from there would ask the WAL to
+            // rewrite entries neither side has any more.
+            let from = from.max(self.log.first_index());
+            self.dirty_from = Some(from);
             r.entries = self.log.entries_from(from).to_vec();
         }
         if self.hard_state_dirty {
@@ -811,6 +820,36 @@ impl Raft {
             p.next = self.log.last_index() + 1;
             p.state = ProgressState::Replicate;
             p.active = true;
+        }
+    }
+
+    /// Give up on a snapshot that was never acknowledged, so it can be resent.
+    ///
+    /// Without this, one dropped `InstallSnapshot` strands a follower forever:
+    /// `pending_snapshot` stays set, `send_append_to` refuses to send entries
+    /// while a snapshot is supposedly in flight, and nothing ever retries. The
+    /// follower is up, connected, voting — and permanently frozen thousands of
+    /// entries behind. No safety property notices, because none is violated.
+    /// It took a liveness watchdog to see it at all.
+    fn expire_pending_snapshots(&mut self) {
+        let timeout = self.opts.election_ticks.max(1);
+        let mut retry = Vec::new();
+        for (id, p) in self.progress.iter_mut() {
+            if p.pending_snapshot == 0 {
+                continue;
+            }
+            p.pending_snapshot_age += 1;
+            if p.pending_snapshot_age > timeout {
+                p.pending_snapshot = 0;
+                p.pending_snapshot_age = 0;
+                p.state = ProgressState::Probe;
+                retry.push(*id);
+            }
+        }
+        // Re-probe: this either resends entries or re-flags the need for a
+        // snapshot, depending on where the follower actually is.
+        for id in retry {
+            self.send_append_to(id);
         }
     }
 
@@ -1043,6 +1082,7 @@ impl Raft {
                 p.next = match_index + 1;
                 p.state = ProgressState::Replicate;
                 p.pending_snapshot = 0;
+                p.pending_snapshot_age = 0;
             }
             self.maybe_advance_commit();
             // Keep streaming if this follower is still behind.
@@ -1095,7 +1135,13 @@ impl Raft {
         // append entry 997 into a log that starts at 1001. The snapshot
         // supersedes every one of those entries; they must not survive it.
         self.pending.entries.clear();
-        self.dirty_from = None;
+        // The snapshot supersedes everything an earlier message in this batch
+        // queued — but *not* everything in the log. `install_snapshot` keeps
+        // entries above the snapshot point when it already covers them, and the
+        // driver resets the WAL to the snapshot index wholesale. Those retained
+        // entries would then exist in memory and not on disk, and the next
+        // append would leave a one-entry hole in the durable log.
+        self.dirty_from = if self.log.last_index() > index { Some(index + 1) } else { None };
         self.pending.snapshot = Some(snapshot);
         self.send(from, Body::SnapshotResp { success: true, index });
     }
@@ -1111,9 +1157,11 @@ impl Raft {
             p.next = p.matched + 1;
             p.state = ProgressState::Probe;
             p.pending_snapshot = 0;
+            p.pending_snapshot_age = 0;
             self.maybe_advance_commit();
         } else {
             p.pending_snapshot = 0;
+            p.pending_snapshot_age = 0;
             p.state = ProgressState::Probe;
         }
     }
@@ -1244,6 +1292,7 @@ impl Raft {
     pub fn send_snapshot(&mut self, peer: NodeId, snapshot: Snapshot) {
         if let Some(p) = self.progress.get_mut(&peer) {
             p.pending_snapshot = snapshot.last_index;
+            p.pending_snapshot_age = 0;
             p.state = ProgressState::Snapshot;
         }
         self.send(peer, Body::SnapshotReq { snapshot });
